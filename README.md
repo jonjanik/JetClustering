@@ -8,28 +8,6 @@ This repository provides:
 
 The framework is intended for research and development of jet clustering algorithms, including classical cone-based approaches, simplified CLUE-like linking methods, and reference anti-kT clustering.
 
-## Repository Structure
-
-JetClustering/
-├── src/
-│   ├── clustering_algorithms.py   # Jet clustering implementations + registry
-│   ├── utils.py                   # Matching, overlap metrics, IO helpers
-│   └── plotting_utils.py          # Plotting routines
-│
-├── configs/
-│   ├── example_config.py          # Minimal working configuration
-│   └── *.py                       # User-defined configs (ignored by git)
-│
-├── data/
-│   └── .gitignore                 # Placeholder for input ROOT files
-│
-├── outputs/                       # Generated caches and plots (ignored)
-│
-├── run_processing.py              # Processing + cache production
-├── run_plots.py                   # Plotting from cached outputs
-├── LICENSE
-└── README.md
-
 ## Workflow
 
 The framework follows a two-step workflow.
