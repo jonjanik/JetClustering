@@ -2,6 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.colors import Normalize
 import mplhep as hep
 
 
@@ -10,7 +11,12 @@ def plot_efficiencies_single_region(
     llabel="Phase-2 Simulation Preliminary",
     rlabel="PU 200 (14 TeV)",
     markers=None, mfc=None, colors=None, labs=None,
-    extra_text=None
+    extra_text=None,
+    genjet_counts=None,
+    genjet_label="GEN jets",
+    genjet_alpha=0.05,
+    genjet_linewidth=2.0,
+    genjet_color = "navy",
 ):
     assert markers is not None
     assert mfc is not None
@@ -18,8 +24,56 @@ def plot_efficiencies_single_region(
     assert labs is not None
 
     hep.style.use("CMS")
-    fig, ax = plt.subplots(figsize=(12, 13), dpi=300)
+    fig, ax = plt.subplots(figsize=(15, 12), dpi=300)
 
+    # ---------------- Secondary axis: GEN-jet histogram ----------------
+    ax2 = None
+    if genjet_counts is not None:
+        genjet_counts = np.asarray(genjet_counts, dtype=float)
+        pt_bins = np.asarray(pt_bins, dtype=float)
+
+        if genjet_counts.shape[0] != pt_bins.shape[0] - 1:
+            raise ValueError(
+                f"genjet_counts has length {genjet_counts.shape[0]} but pt_bins implies {pt_bins.shape[0] - 1} bins"
+            )
+
+        ax2 = ax.twinx()
+
+        # step-style histogram using the bin edges
+        y_step = np.r_[genjet_counts, genjet_counts[-1] if len(genjet_counts) > 0 else 0.0]
+
+        ax2.step(
+            pt_bins,
+            y_step,
+            where="post",
+            color=genjet_color,
+            linewidth=genjet_linewidth,
+            alpha=0.9,
+            label=genjet_label,
+            zorder=1,
+        )
+        ax2.fill_between(
+            pt_bins,
+            y_step,
+            step="post",
+            alpha=genjet_alpha,
+            color=genjet_color,
+            zorder=1,
+        )
+
+        ax2.set_ylabel("Number of GEN jets", fontsize=24, color=genjet_color)
+        ax2.tick_params(axis="y", labelsize=18, colors=genjet_color)
+        ax2.grid(False)
+
+        ymax2 = float(np.max(genjet_counts)) if len(genjet_counts) > 0 else 1.0
+        ax2.set_ylim(0.0, 1.15 * ymax2 if ymax2 > 0 else 1.0)
+
+        # ymin = np.min(genjet_counts[genjet_counts > 0]) if np.any(genjet_counts > 0) else 1e-3
+        # ymax = np.max(genjet_counts) if np.max(genjet_counts) > 0 else 1.0
+        # ax2.set_yscale("log")
+        # ax2.set_ylim(ymin * 0.8, ymax * 1.2)
+
+    # ---------------- Efficiency curves ----------------
     for l, (key, (pt_centers, eff, errors)) in enumerate(efficiencies.items()):
         ax.errorbar(
             pt_centers, eff, yerr=errors,
@@ -30,7 +84,8 @@ def plot_efficiencies_single_region(
             mfc=mfc[l],
             markersize=14,
             capsize=8,
-            linewidth=3
+            linewidth=3,
+            zorder=3,
         )
 
     # Reference lines
@@ -41,7 +96,6 @@ def plot_efficiencies_single_region(
     ax.set_xlim(0.0, xmax)
 
     ax.xaxis.set_major_locator(ticker.MultipleLocator(20))
-
     ax.xaxis.set_minor_locator(ticker.MultipleLocator(10))
 
     ax.set_xlabel(r"$p_T^{GEN}$ [GeV]", fontsize=24, loc="right")
@@ -73,7 +127,23 @@ def plot_efficiencies_single_region(
             fontsize=18
         )
 
-    ax.legend()
+    # combine legends from both axes
+    handles, labels = ax.get_legend_handles_labels()
+    if ax2 is not None:
+        h2, l2 = ax2.get_legend_handles_labels()
+        handles += h2
+        labels += l2
+
+    # ax.legend(handles, labels)
+    ax.legend(
+        handles,
+        labels,
+        loc="lower right",
+        bbox_to_anchor=(0.95, 0.12),
+        frameon=False,
+        fontsize=20,
+        handlelength=1.6,
+    )
     plt.tight_layout()
     plt.savefig(outputfile, dpi=300)
     plt.close(fig)
@@ -667,6 +737,113 @@ def plot_quantiles_vs_ptgen(
     plt.close(fig)
 
 
+def plot_quantiles_vs_ptgen_overlay(
+    curves,
+    outputfile,
+    ylabel,
+    title=None,
+    llabel="Phase-2 Simulation Preliminary",
+    rlabel="PU 200 (14 TeV)",
+    ylim=None
+):
+    """
+    Overlay response quantiles for multiple algorithms on one plot.
+
+    Parameters
+    ----------
+    curves : list of dict
+        Each entry should have:
+            {
+                "label": str,          # algorithm name
+                "pt_centers": array-like,
+                "q16": array-like,
+                "q50": array-like,
+                "q84": array-like,
+            }
+    """
+    hep.style.use("CMS")
+    fig, ax = plt.subplots(figsize=(7.6, 5.6), dpi=300)
+
+    any_drawn = False
+
+    for c in curves:
+        label = c["label"]
+        pt_centers = np.asarray(c["pt_centers"], dtype=float)
+        q16 = np.asarray(c["q16"], dtype=float)
+        q50 = np.asarray(c["q50"], dtype=float)
+        q84 = np.asarray(c["q84"], dtype=float)
+
+        ok = np.isfinite(pt_centers) & np.isfinite(q16) & np.isfinite(q50) & np.isfinite(q84)
+        pt_centers = pt_centers[ok]
+        q16 = q16[ok]
+        q50 = q50[ok]
+        q84 = q84[ok]
+
+        if len(pt_centers) == 0:
+            continue
+
+        # median
+        line, = ax.plot(
+            pt_centers, q50,
+            marker="o",
+            markersize=3,
+            linestyle="-",
+            linewidth=1.,
+            label=label
+        )
+
+        color = line.get_color()
+
+        # 16% and 84% quantiles as dotted lines
+        ax.plot(
+            pt_centers, q16,
+            linestyle=":",
+            linewidth=1.2,
+            color=color
+        )
+        ax.plot(
+            pt_centers, q84,
+            linestyle=":",
+            linewidth=1.2,
+            color=color
+        )
+
+        any_drawn = True
+
+    ax.set_xlabel(r"$p_T^{GEN}$ [GeV]", fontsize=14, loc="right")
+    ax.set_ylabel(ylabel, fontsize=14)
+    ax.grid(alpha=0.25)
+
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+
+    if any_drawn:
+        ax.legend(title="median",fontsize=8, title_fontsize=10, frameon=False)
+
+    # note explaining dotted lines
+    ax.text(
+        0.95, 0.02,
+        "Dotted: 16% / 84% quantiles",
+        transform=ax.transAxes,
+        ha="right", va="bottom",
+        fontsize=10
+    )
+
+    hep.cms.label(ax=ax, llabel=llabel, rlabel=rlabel, loc=0, fontsize=12)
+
+    if title:
+        ax.text(
+            0.05, 0.92, title,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=12, fontweight="bold"
+        )
+
+    plt.tight_layout()
+    plt.savefig(outputfile, dpi=300)
+    plt.close(fig)
+
+
 def plot_turnon_curves(
     pt_centers,
     curves,  # dict: threshold -> (eff, err)
@@ -975,6 +1152,102 @@ def plot_eff_or_fake_vs_pt(
     if title:
         ax.text(0.05, 0.92, title, transform=ax.transAxes, ha="left", va="top",
                 fontsize=12, fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(outputfile, dpi=300)
+    plt.close(fig)
+
+
+def plot_event_eta_phi_scatter(
+    eta,
+    phi,
+    pt,
+    outputfile,
+    title=None,
+    llabel="Phase-2 Simulation Preliminary",
+    rlabel="PU 200 (14 TeV)",
+    eta_range=(-2.4, 2.4),
+    phi_range=(-3.2, 3.2),
+    pt_min=0.0,
+    pt_max_for_size=50.0,
+    marker_size_min=6.0,
+    marker_size_max=80.0,
+):
+    """
+    Eta-phi scatter plot for one event.
+    - marker size scales with pT
+    - marker color shows log10(pT)
+    """
+
+    hep.style.use("CMS")
+    fig, ax = plt.subplots(figsize=(7.4, 6.2), dpi=300)
+
+    eta = np.asarray(eta, dtype=float)
+    phi = np.asarray(phi, dtype=float)
+    pt = np.asarray(pt, dtype=float)
+
+    mask = np.isfinite(eta) & np.isfinite(phi) & np.isfinite(pt) & (pt >= float(pt_min))
+    eta = eta[mask]
+    phi = phi[mask]
+    pt = pt[mask]
+
+    if eta.size == 0:
+        ax.text(0.5, 0.5, "No candidates", transform=ax.transAxes,
+                ha="center", va="center", fontsize=16)
+        ax.set_xlabel(r"$\phi$", fontsize=14)
+        ax.set_ylabel(r"$\eta$", fontsize=14)
+        ax.set_xlim(*phi_range)
+        ax.set_ylim(*eta_range)
+        hep.cms.label(ax=ax, llabel=llabel, rlabel=rlabel, loc=0, fontsize=12)
+        if title:
+            ax.text(0.03, 0.95, title, transform=ax.transAxes,
+                    ha="left", va="top", fontsize=12, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(outputfile, dpi=300)
+        plt.close(fig)
+        return
+
+    # marker size scaling
+    pt_clip = np.clip(pt, 0.0, float(pt_max_for_size))
+    if pt_max_for_size > 0:
+        sizes = marker_size_min + (marker_size_max - marker_size_min) * (pt_clip / float(pt_max_for_size))
+    else:
+        sizes = np.full_like(pt, marker_size_min)
+
+    # color by log10(pt)
+    color_val = np.log10(np.maximum(pt, 1e-2))
+    norm = Normalize(vmin=np.min(color_val), vmax=np.max(color_val) if np.max(color_val) > np.min(color_val) else np.min(color_val) + 1.0)
+
+    sc = ax.scatter(
+        phi,
+        eta,
+        c=color_val,
+        s=sizes,
+        cmap="viridis",
+        norm=norm,
+        alpha=0.75,
+        linewidths=0.0,
+    )
+
+    cbar = plt.colorbar(sc, ax=ax, pad=0.02)
+    cbar.set_label(r"$\log_{10}(p_T / \mathrm{GeV})$", fontsize=12)
+
+    ax.set_xlabel(r"$\phi$", fontsize=14)
+    ax.set_ylabel(r"$\eta$", fontsize=14)
+    ax.set_xlim(*phi_range)
+    ax.set_ylim(*eta_range)
+
+    ax.grid(alpha=0.25)
+
+    hep.cms.label(ax=ax, llabel=llabel, rlabel=rlabel, loc=0, fontsize=12)
+
+    if title:
+        ax.text(
+            0.03, 0.95, title,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=12, fontweight="bold"
+        )
 
     plt.tight_layout()
     plt.savefig(outputfile, dpi=300)

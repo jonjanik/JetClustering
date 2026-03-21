@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import numpy as np
 import awkward as ak
+import inspect
 
 from src.utils import (
     load_arrays, ensure_dir, match_gen_to_reco, match_reco_to_gen,
@@ -91,7 +92,8 @@ def branch_list(cfg):
     bl = []
     for _, cmap in cfg.BRANCHES["cands"].items():
         for _, br in cmap.items():
-            bl.append(br)
+            if br:
+                bl.append(br)
     for _, br in cfg.BRANCHES["genjets"].items():
         bl.append(br)
     vtx = cfg.BRANCHES.get("vtx", {})
@@ -119,6 +121,34 @@ def scalar_item(x, default=None):
             return default
         return scalar_item(x[0], default=default)
     return x
+
+
+def call_algo_with_supported_kwargs(fn, eta, phi, pt, extra_kwargs, algo_kwargs):
+    """
+    Call clustering function with only the keyword arguments it actually accepts.
+
+    - fn: algorithm function
+    - eta, phi, pt: positional candidate arrays
+    - extra_kwargs: optional per-event extras like mass/charge/abs_pdgid
+    - algo_kwargs: static algorithm params from config
+    """
+    sig = inspect.signature(fn)
+    params = sig.parameters
+
+    accepts_var_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in params.values()
+    )
+
+    merged = {}
+    merged.update(extra_kwargs)
+    merged.update(algo_kwargs)
+
+    if accepts_var_kw:
+        return fn(eta, phi, pt, **merged)
+
+    allowed = {k: v for k, v in merged.items() if k in params}
+    return fn(eta, phi, pt, **allowed)
 
 
 def compute_event_dz_cat(cfg, data, ievt: int) -> int:
@@ -325,6 +355,16 @@ def run(cfg, cfg_tag: str):
                 "eta": data[cdef["eta"]],
                 "phi": data[cdef["phi"]],
             }
+            # OPTIONAL extras (only if provided in config)
+            if "mass" in cdef and cdef["mass"]:
+                cand_arrays[inp]["mass"] = data[cdef["mass"]]
+            if "charge" in cdef and cdef["charge"]:
+                cand_arrays[inp]["charge"] = data[cdef["charge"]]
+            # use name "pid" or "pdgId" depending on your ntuple conventions
+            if "abs_pdgid" in cdef and cdef["abs_pdgid"]:
+                cand_arrays[inp]["abs_pdgid"] = data[cdef["abs_pdgid"]]
+            elif "pdgId" in cdef and cdef["pdgId"]:
+                cand_arrays[inp]["abs_pdgid"] = data[cdef["pdgId"]]
 
         # -----------------------------
         # Event loop
@@ -357,7 +397,24 @@ def run(cfg, cfg_tag: str):
                 cphi = wrap_phi(ak.to_numpy(cand_arrays[inp]["phi"][ievt]))
 
                 for aname, _ in enabled_algos:
-                    jets, assign, seed_mask = algo_fns[aname](ceta, cphi, cpt, **algo_params[aname])
+                    cmass = ak.to_numpy(cand_arrays[inp]["mass"][ievt]) if "mass" in cand_arrays[inp] else None
+                    cchg  = ak.to_numpy(cand_arrays[inp]["charge"][ievt]) if "charge" in cand_arrays[inp] else None
+                    cpid  = ak.to_numpy(cand_arrays[inp]["abs_pdgid"][ievt]) if "abs_pdgid" in cand_arrays[inp] else None
+                    if cpid is not None:
+                        cpid = np.abs(cpid).astype(int)
+
+                    extra_kwargs = {
+                        "mass": cmass,
+                        "charge": cchg,
+                        "abs_pdgid": cpid,
+                    }
+
+                    jets, assign, seed_mask = call_algo_with_supported_kwargs(
+                        algo_fns[aname],
+                        ceta, cphi, cpt,
+                        extra_kwargs=extra_kwargs,
+                        algo_kwargs=algo_params[aname],
+                    )
                     rpt_all, reta_all, rphi_all, _ = jets
 
                     rpt_all = np.asarray(rpt_all, dtype=float)

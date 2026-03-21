@@ -1,4 +1,4 @@
-# src/clustering.py
+# src/clustering_algorithms.py
 import numpy as np
 
 # -------------------------
@@ -82,10 +82,6 @@ def weighted_centroid_eta_phi(eta, phi, w, eta0=None, phi0=None):
     """
     w = np.asarray(w, dtype=float)
     sw = float(np.sum(w))
-    if sw <= 0.0:
-        if eta0 is None or phi0 is None:
-            return float(np.mean(eta) if len(eta) else 0.0), float(wrap_phi(np.mean(phi) if len(phi) else 0.0))
-        return float(eta0), float(wrap_phi(phi0))
 
     eta = np.asarray(eta, dtype=float)
     phi = np.asarray(phi, dtype=float)
@@ -241,24 +237,22 @@ def seeded_cone_nms_weighted(
     idx = np.arange(N, dtype=int)
 
     for i in range(N):
-        if not seed_mask[i]:
-            continue
         dphi = np.arctan2(np.sin(phi - phi[i]), np.cos(phi - phi[i]))
         deta = eta - eta[i]
         dr2 = deta * deta + dphi * dphi
 
         neigh = (dr2 < thr2_seed)
-        neigh[i] = False
+        neigh[i] = False   # candidate is not its own neighbor
         if not np.any(neigh):
             continue
 
-        jcand = idx[neigh]
+        jcand = idx[neigh]   # list of indices of all particles that are neighbors of i
         higher = (pt[jcand] > pt[i]) | ((pt[jcand] == pt[i]) & (jcand < i))
         if np.any(higher):
             seed_mask[i] = False
 
-    seed_idx = np.sort(np.where(seed_mask)[0])
-    seed_to_cluster = {old: new for new, old in enumerate(seed_idx)}
+    seed_idx = np.sort(np.where(seed_mask)[0])   # sorted list of indices of seeds (where seed_mask=True)
+    seed_to_cluster = {old: new for new, old in enumerate(seed_idx)}   # dict seed_idx: cluster_idx
 
 
     # centroid per seed
@@ -271,12 +265,7 @@ def seeded_cone_nms_weighted(
         dr2 = deta * deta + dphi * dphi
 
         mask = (dr2 < thr2_cen)
-        w = pt[mask]
-        sw = float(np.sum(w))
-        if sw <= 0.0:
-            cent_eta.append(float(eta[s]))
-            cent_phi.append(float(wrap_phi(phi[s])))
-            continue
+        w = pt[mask]   # pT array of all p. inside cone of seed
 
         eta_c, phi_c = weighted_centroid_eta_phi(eta[mask], phi[mask], w, eta0=eta[s], phi0=phi[s])
         cent_eta.append(float(eta_c))
@@ -293,6 +282,7 @@ def seeded_cone_nms_weighted(
 
     thr2_clu = float(R_clu) * float(R_clu)
 
+    # for scores (to assign), here use seed_pT, alt: cluster_pT,...
     seed_pt = pt[seed_idx].astype(float)
     denom = np.power(np.maximum(seed_pt, 1e-6), float(alpha_seed))
 
@@ -301,31 +291,31 @@ def seeded_cone_nms_weighted(
         deta = cent_eta - eta[i]
         dr2  = deta * deta + dphi * dphi
 
-        ok = (dr2 < thr2_clu)
+        ok = (dr2 < thr2_clu)   # centroid axes within clustering radius
         if not np.any(ok):
             continue
 
         score = np.full_like(dr2, np.inf, dtype=float)
         score[ok] = dr2[ok] / denom[ok]
 
-        j = int(np.argmin(score))
-
+        j = int(np.argmin(score))  # index of smallest value in score
         min_score = score[j]
-        ties = np.where(score == min_score)[0]
+
+        ties = np.where(score == min_score)[0]   # index array of ties
         # sort ties by dR, if also tied sort by idx
         if ties.size > 1:
             dr2_t = dr2[ties]
             j = int(ties[np.lexsort((ties, dr2_t))[0]])
 
-        if ok[j]:
-            assign[i] = seed_to_cluster[seed_idx[j]]
+        assign[i] = seed_to_cluster[seed_idx[j]]   # assign p. idx to cluster idx
 
+    # assign seeds to the their clusters
     for s in seed_idx:
         assign[s] = seed_to_cluster[s]
 
     jets_pt, jets_eta, jets_phi, jets_mass = build_clusters(pt, eta, phi, assign)
     jets = (jets_pt, jets_eta, jets_phi, jets_mass)
-    return jets, assign, seed_mask
+    return jets, assign, seed_mask   # jet kinematics, list of jets each p. is assigned to, list whether p. is seed or not
 
 
 # -------------------------
@@ -413,7 +403,7 @@ def _nearest_higher_parent_indices(eta, phi, pt, R_link=0.2, pt_min=0.0):
         dr2 = deta * deta + dphi * dphi
 
         neigh = (dr2 < thr2)
-        neigh[i] = False
+        neigh[i] = False   # i not its own neighbor
 
         if not np.any(neigh):
             parent[i] = i
@@ -455,12 +445,12 @@ def _root_assign_from_parent(parent):
         while True:
             pj = parent[j]
             if pj < 0:
-                root_idx[i] = -1
+                root_idx[i] = -1   # unassigned / ignored
                 break
             if pj == j:
-                root_idx[i] = j
+                root_idx[i] = j   # is root
                 break
-            j = pj
+            j = pj   # set current p. to parent
 
     roots = np.unique(root_idx[root_idx >= 0])   # -1 unassigned
     roots = np.sort(roots)   # sorted list of unique root particle indices
@@ -861,6 +851,101 @@ def linkbary_nearest_weighted(
     jets = (jets_pt, jets_eta, jets_phi, jets_mass)
     return jets, assign, seed_mask
 
+def lgatr_hdbscan(
+    eta, phi, pt,
+    *,
+    model_path,
+    device="cuda",
+    pt_min=0.0,
+    mass=None,
+    charge=None,
+    abs_pdgid=None,
+    base_mode="logpt_etaphi",
+    cpu_demo=False,
+    cluster_method="hdbscan",
+    min_cluster_size=10,
+    min_samples=20,
+    epsilon=0.1,
+    dbscan_eps=0.1,
+    dbscan_min_samples=10,
+    **_,
+):
+    """
+    LGATr inference + clustering -> per-constituent assign.
+
+    Inputs:
+      eta,phi,pt: per-cand arrays
+      mass/charge/abs_pdgid: optional extra arrays
+      model_path: weights file or bundle dir containing model_meta.json + weights
+    """
+    eta = np.asarray(eta, dtype=float)
+    phi = np.asarray(phi, dtype=float)
+    pt  = np.asarray(pt,  dtype=float)
+
+    N = len(pt)
+    if N == 0:
+        empty = (np.array([]), np.array([]), np.array([]), np.array([]))
+        return empty, np.array([], dtype=int), np.array([], dtype=bool)
+
+    active = (pt >= float(pt_min))
+    if not np.any(active):
+        empty = (np.array([]), np.array([]), np.array([]), np.array([]))
+        return empty, np.full(N, -1, dtype=int), np.zeros(N, dtype=bool)
+
+    # slice to active set for model+clustering, then scatter back
+    idx_active = np.where(active)[0]
+    eta_a = eta[idx_active]
+    phi_a = wrap_phi(phi[idx_active])
+    pt_a  = pt[idx_active]
+
+    mass_a = None if mass is None else np.asarray(mass, dtype=float)[idx_active]
+    charge_a = None if charge is None else np.asarray(charge, dtype=float)[idx_active]
+    abs_pdgid_a = None if abs_pdgid is None else np.asarray(abs_pdgid, dtype=int)[idx_active]
+
+    from src.lgatr_adapter import (
+        load_lgatr_bundle,
+        predict_coords_single_event,
+        cluster_coords_single_event,
+        reindex_labels_to_assign,
+    )
+
+    model, meta = load_lgatr_bundle(model_path, device=device)
+
+    coords = predict_coords_single_event(
+        model, meta,
+        pt_a, eta_a, phi_a,
+        mass=mass_a,
+        charge=charge_a,
+        abs_pdgid=abs_pdgid_a,
+        device=device,
+        base_mode=base_mode,
+        cpu_demo=cpu_demo,
+    )
+
+    labels = cluster_coords_single_event(
+        coords,
+        method=cluster_method,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        epsilon=epsilon,
+        dbscan_eps=dbscan_eps,
+        dbscan_min_samples=dbscan_min_samples,
+    )
+
+    assign_a = reindex_labels_to_assign(labels)
+
+    # scatter back into full-length assign
+    assign = np.full(N, -1, dtype=int)
+    assign[idx_active] = assign_a.astype(int)
+
+    # build jets using your existing p4 summation
+    jets_pt, jets_eta, jets_phi, jets_mass = build_clusters(
+        pt, eta, wrap_phi(phi), assign, mass=mass
+    )
+    jets = (jets_pt, jets_eta, jets_phi, jets_mass)
+
+    seed_mask = np.zeros(N, dtype=bool)  # not meaningful here
+    return jets, assign, seed_mask
 
 ALGO_REGISTRY = {
     # reference
@@ -878,4 +963,7 @@ ALGO_REGISTRY = {
     "link_centroid_nearest": link_centroid_nearest,
     "link_centroid_nearest_weighted": link_centroid_nearest_weighted,
     "linkbary_nearest_weighted": linkbary_nearest_weighted,
+
+    # transformer
+    "lgatr_hdbscan": lgatr_hdbscan,
 }

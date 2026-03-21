@@ -4,7 +4,7 @@ import argparse
 import importlib.util
 import numpy as np
 
-from src.utils import ensure_dir
+from src.utils import ensure_dir, load_arrays
 from src.plotting_utils import (
     plot_efficiencies_single_region,
     plot_ridgeline,
@@ -15,11 +15,13 @@ from src.plotting_utils import (
     plot_multiplicity_hist,
     plot_ht_hist,
     plot_quantiles_vs_ptgen,
+    plot_quantiles_vs_ptgen_overlay,
     plot_turnon_curves,
 
     plot_f1_vs_threshold,
     plot_akcompat_overlay_hist_subplots,
     plot_eff_or_fake_vs_pt,
+    plot_event_eta_phi_scatter,
 )
 
 def load_cfg_from_path(cfg_path: str):
@@ -66,11 +68,12 @@ def resolve_eff_style(cfg, input_name, algo_name, curve_key, fallback_index):
 
     if (input_name, algo_name) in getattr(cfg, "EFF_STYLE_MAP", {}):
         st = cfg.EFF_STYLE_MAP[(input_name, algo_name)]
-        return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), st.get("label", curve_key)
+        return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), st.get("label", cfg.ALGORITHMS.get(algo_name, {}).get("label", algo_name))
 
     defaults = getattr(cfg, "EFF_STYLE_DEFAULTS", [{"marker": "o", "color": "black", "mfc": "none"}])
     st = defaults[fallback_index % len(defaults)]
-    return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), curve_key
+    algo_label = cfg.ALGORITHMS.get(algo_name, {}).get("label", algo_name)
+    return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), algo_label
 
 def load_matches(cache_dir, inp, algo):
     f = os.path.join(cache_dir, f"matches__{sanitize(inp)}__{sanitize(algo)}.npz")
@@ -99,7 +102,7 @@ def load_event_metrics(cache_dir, inp, algo):
 
 def get_region_defs(cfg):
     # Always have an explicit inclusive region label
-    base = {"Inclusive eta gen jet": lambda eta: np.ones_like(eta, dtype=bool)}
+    base = {"Inclusive GEN jet eta": lambda eta: np.abs(eta) < 2.4}
 
     if getattr(cfg, "REGION_SPLIT", {}).get("enabled", True):
         defs = dict(getattr(cfg, "REGION_SPLIT", {}).get("definitions", {}))
@@ -108,7 +111,7 @@ def get_region_defs(cfg):
         if "Inclusive" in defs:
             defs.pop("Inclusive")
 
-        defs["Inclusive eta gen jet"] = base["Inclusive eta gen jet"]
+        defs["Inclusive Gen jet eta"] = base["Inclusive GEN jet eta"]
         return defs
 
     return base
@@ -186,6 +189,18 @@ def title_reco_reco(proc_label, input_name, ref_algo):
     return f"{proc_label}\n{input_name} (ref: {ref_algo})"
 
 
+def wrap_phi_np(phi):
+    return (phi + np.pi) % (2 * np.pi) - np.pi
+
+
+def event_scatter_branch_list(cfg, enabled_inputs):
+    bl = []
+    for inp in enabled_inputs:
+        cdef = cfg.BRANCHES["cands"][inp]
+        bl.extend([cdef["pt"], cdef["eta"], cdef["phi"]])
+    return sorted(set(bl))
+
+
 def run(cfg, cfg_tag: str):
     out_root = os.path.join(getattr(cfg, "OUTDIR", "outputs"), cfg_tag)
     ensure_dir(out_root)
@@ -209,6 +224,55 @@ def run(cfg, cfg_tag: str):
         cache_dir = os.path.join(out_proc, "cache")
         if not os.path.isdir(cache_dir):
             raise RuntimeError(f"Cache directory not found: {cache_dir}. Run run_processing.py with the same --config.")
+
+        # ---------------- Event scatter plots (PF / PUPPI first N events) ----------------
+        if cfg.STUDIES.get("event_scatter", False):
+            out_evt = os.path.join(out_proc, "event_scatter")
+            ensure_dir(out_evt)
+
+            escfg = getattr(cfg, "EVENT_SCATTER", {})
+            n_events = int(escfg.get("n_events", 20))
+            eta_range = tuple(escfg.get("eta_range", (-3.2, 3.2)))
+            phi_range = tuple(escfg.get("phi_range", (-3.2, 3.2)))
+            pt_min = float(escfg.get("pt_min", 0.0))
+            pt_max_for_size = float(escfg.get("pt_max_for_size", 50.0))
+            marker_size_min = float(escfg.get("marker_size_min", 6.0))
+            marker_size_max = float(escfg.get("marker_size_max", 80.0))
+
+            evt_branches = event_scatter_branch_list(cfg, enabled_inputs)
+            evt_data = load_arrays(pinfo["path"], cfg.TREE_NAME, evt_branches, library="ak")
+            n_total_evt = len(evt_data[cfg.BRANCHES["cands"][enabled_inputs[0]]["pt"]])
+            n_plot = min(n_events, n_total_evt)
+
+            for inp in enabled_inputs:
+                out_inp = os.path.join(out_evt, sanitize(inp))
+                ensure_dir(out_inp)
+
+                cdef = cfg.BRANCHES["cands"][inp]
+
+                for ievt in range(n_plot):
+                    pt = np.asarray(evt_data[cdef["pt"]][ievt], dtype=float)
+                    eta = np.asarray(evt_data[cdef["eta"]][ievt], dtype=float)
+                    phi = wrap_phi_np(np.asarray(evt_data[cdef["phi"]][ievt], dtype=float))
+
+                    # title = f"{plabel}\n{inp} candidates — event {ievt}"
+                    title = f"{plabel}\n{inp} candidates"
+
+                    plot_event_eta_phi_scatter(
+                        eta=eta,
+                        phi=phi,
+                        pt=pt,
+                        outputfile=os.path.join(out_inp, f"event_{ievt:03d}.png"),
+                        title=title,
+                        llabel=cfg.PLOT_LABELS["llabel"],
+                        rlabel=cfg.PLOT_LABELS["rlabel"],
+                        eta_range=eta_range,
+                        phi_range=phi_range,
+                        pt_min=pt_min,
+                        pt_max_for_size=pt_max_for_size,
+                        marker_size_min=marker_size_min,
+                        marker_size_max=marker_size_max,
+                    )
 
         denom = load_denoms(cache_dir)
         gen_pt_all = denom["gen_pt"].astype(np.float32)
@@ -242,6 +306,8 @@ def run(cfg, cfg_tag: str):
                     pt_bins_eff = cfg.PT_BINS["efficiency"]
                     pt_cent = 0.5 * (pt_bins_eff[:-1] + pt_bins_eff[1:])
                     total = np.histogram(gen_pt_denom, bins=pt_bins_eff)[0].astype(float)
+                    # total_norm = total / np.sum(total)
+
 
                     eff_curves = {}
                     keys = []
@@ -284,9 +350,9 @@ def run(cfg, cfg_tag: str):
                         mfc=mfc,
                         colors=colors,
                         labs=labs,
-                        extra_text=extra_text
+                        extra_text=extra_text,
+                        genjet_counts=total,
                     )
-
                 # ---------------- Ridgelines ----------------
                 if cfg.STUDIES.get("response_ridgeline", False):
                     pt_bins_r = cfg.PT_BINS["ridgeline"]
@@ -492,6 +558,9 @@ def run(cfg, cfg_tag: str):
 
                     pt_bins_s = np.asarray(cfg.PT_BINS.get("summary_gen", cfg.PT_BINS["efficiency"]), dtype=float)
 
+                    # ---------------------------------------------------------
+                    # Per-input single plots (existing behavior)
+                    # ---------------------------------------------------------
                     for inp in enabled_inputs:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
@@ -513,8 +582,47 @@ def run(cfg, cfg_tag: str):
                                 title=title,
                                 llabel=cfg.PLOT_LABELS["llabel"],
                                 rlabel=cfg.PLOT_LABELS["rlabel"],
-                                ylim=(0.0, 3.0)
+                                ylim=(0.0, 1.4)
                             )
+
+                    # ---------------------------------------------------------
+                    # overlay all input algorithms
+                    # ---------------------------------------------------------
+                    for inp in enabled_inputs:
+                        curves = []
+
+                        for algo in enabled_algos:
+                            rec = load_matches(cache_dir, inp, algo)
+
+                            m_z = zcat_mask_fn(rec["dz_cat"].astype(np.int32))
+                            m_r = region_fn(rec["gen_eta"].astype(np.float32))
+                            m = m_z & m_r
+
+                            gen_pt = rec["gen_pt"].astype(np.float32)[m]
+                            resp   = rec["resp"].astype(np.float32)[m]
+
+                            pt_cent, (q16, q50, q84) = _bin_quantiles(gen_pt, resp, pt_bins_s, q=(16, 50, 84))
+
+                            algo_label = cfg.ALGORITHMS.get(algo, {}).get("label", algo)
+
+                            curves.append({
+                                "label": algo_label,
+                                "pt_centers": pt_cent,
+                                "q16": q16,
+                                "q50": q50,
+                                "q84": q84,
+                            })
+
+                        title = f"{plabel} — {region_name} — {zcat_name}\n{inp} · all algorithms"
+                        plot_quantiles_vs_ptgen_overlay(
+                            curves=curves,
+                            outputfile=os.path.join(out_q, f"resp_q16_50_84_overlay_algos__{sanitize(inp)}.png"),
+                            ylabel=r"$p_T^{RECO}/p_T^{GEN}$",
+                            title=title,
+                            llabel=cfg.PLOT_LABELS["llabel"],
+                            rlabel=cfg.PLOT_LABELS["rlabel"],
+                            ylim=(0.5, 2)
+                        )
 
                 # -- dR quantiles vs pT^GEN
                 if cfg.STUDIES.get("dr_quantiles", False):
