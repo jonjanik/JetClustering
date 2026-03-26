@@ -128,12 +128,6 @@ All behavior is controlled via single Python config file:
 Configs are resolved automatically from:
 configs/<name>.py
 
-Example:
-python run_clustering.py --config test.py
-
-Start from:
-configs/example_config.py
-
 ---
 
 ## Dependencies
