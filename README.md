@@ -26,7 +26,9 @@ The framework follows a three-step pipeline:
 - Run selected clustering algorithms
 - Store outputs in a snapshot ROOT file
 
-python run_clustering.py --config test.py
+```
+python3 run_clustering.py --config test.py
+```
 
 Output:
 outputs/<config_tag>/<sample>/snapshot/clustered_events.root
@@ -44,7 +46,9 @@ outputs/<config_tag>/<sample>/snapshot/clustered_events.root
   - event-level observables
 - Write compact .npz caches
 
+```
 python run_studies.py --config test.py
+```
 
 Output:
 outputs/<config_tag>/<sample>/studies/cache/
@@ -56,7 +60,9 @@ outputs/<config_tag>/<sample>/studies/cache/
 - Read cached study outputs
 - Produce diagnostic and comparison plots
 
+```
 python run_plotting.py --config test.py
+```
 
 Output:
 outputs/<config_tag>/<sample>/plots/
@@ -110,7 +116,7 @@ The framework provides:
 
 ## Configuration
 
-All behavior is controlled via Python config files:
+All behavior is controlled via single Python config file:
 
 - Input datasets and branches
 - Enabled inputs (e.g. PF, PUPPI)
