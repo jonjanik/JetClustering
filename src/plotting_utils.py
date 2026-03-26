@@ -68,10 +68,6 @@ def plot_efficiencies_single_region(
         ymax2 = float(np.max(genjet_counts)) if len(genjet_counts) > 0 else 1.0
         ax2.set_ylim(0.0, 1.15 * ymax2 if ymax2 > 0 else 1.0)
 
-        # ymin = np.min(genjet_counts[genjet_counts > 0]) if np.any(genjet_counts > 0) else 1e-3
-        # ymax = np.max(genjet_counts) if np.max(genjet_counts) > 0 else 1.0
-        # ax2.set_yscale("log")
-        # ax2.set_ylim(ymin * 0.8, ymax * 1.2)
 
     # ---------------- Efficiency curves ----------------
     for l, (key, (pt_centers, eff, errors)) in enumerate(efficiencies.items()):
@@ -101,6 +97,7 @@ def plot_efficiencies_single_region(
     ax.set_xlabel(r"$p_T^{GEN}$ [GeV]", fontsize=24, loc="right")
     ax.set_ylabel("Efficiency", fontsize=24)
     ax.set_ylim(0.0, 1.15)
+
 
     ax.grid(True, which="major", linestyle="--", alpha=0.7)
     ax.grid(True, which="minor", linestyle=":", alpha=0.35)
@@ -969,6 +966,9 @@ def plot_akcompat_overlay_hist_subplots(
     bins=np.linspace(0, 1, 25),
     xlim=(0, 1),
     ncols=None,  # accept for backward compatibility
+    yscale="log",
+    ymin_log=0.8,
+    algo_labels=None,
 ):
     """
     Vertical stack of overlay histograms (one row per pT bin), with:
@@ -984,6 +984,17 @@ def plot_akcompat_overlay_hist_subplots(
     hep.style.use("CMS")
 
     pt_bins = np.asarray(pt_bins, dtype=float)
+
+    # bins = np.asarray(bins, dtype=float)
+    if bins is None:
+        # non-uniform binning: coarse at low IoU, fine close to 1
+        bins = np.concatenate([
+            np.linspace(0.00, 0.80, 17),   # wider bins below 0.8
+            np.linspace(0.80, 0.95, 16),   # finer
+            np.linspace(0.95, 1.00, 21),   # very fine near 1
+        ])
+        bins = np.unique(np.clip(bins, 0.0, 1.0))
+
     bins = np.asarray(bins, dtype=float)
 
     nrows = len(values_by_ptbin_by_algo)
@@ -1002,6 +1013,9 @@ def plot_akcompat_overlay_hist_subplots(
     for d in values_by_ptbin_by_algo:
         all_algos |= set(d.keys())
     all_algos = sorted(all_algos)
+
+    if algo_labels is None:
+        algo_labels = {}
 
     height_per_row = 0.82
     fig_w = 9.0
@@ -1040,16 +1054,23 @@ def plot_akcompat_overlay_hist_subplots(
             counts, _ = np.histogram(vals, bins=bins)
             ymax = max(ymax, float(np.max(counts)) if counts.size else 0.0)
 
-            ax.hist(vals, bins=bins, histtype="step", linewidth=1.7, label=algo)
+            ax.hist(vals, bins=bins, histtype="step", linewidth=1.2, label=algo_labels.get(algo, algo))
             any_drawn = True
 
         ax.set_xlim(*xlim)
         ax.grid(alpha=0.16)
 
-        if ymax > 0:
-            ax.set_ylim(0.0, 1.25 * ymax)
+        if yscale == "log":
+            if ymax > 0:
+                ax.set_yscale("log")
+                ax.set_ylim(ymin_log, 1.8 * ymax)
+            else:
+                ax.set_ylim(0.0, 1.0)
         else:
-            ax.set_ylim(0.0, 1.0)
+            if ymax > 0:
+                ax.set_ylim(0.0, 1.25 * ymax)
+            else:
+                ax.set_ylim(0.0, 1.0)
 
         ax.tick_params(axis="both", which="major", labelsize=9)
         ax.tick_params(axis="both", which="minor", labelsize=8)
@@ -1123,6 +1144,125 @@ def plot_akcompat_overlay_hist_subplots(
     plt.savefig(outputfile, dpi=300)
     plt.close(fig)
 
+
+
+
+def plot_akcompat_exact_match_table(
+    values_by_ptbin_by_algo,
+    pt_bins,
+    outputfile,
+    title=None,
+    llabel="Phase-2 Simulation Preliminary",
+    rlabel="PU 200 (14 TeV)",
+    algo_labels=None,
+    algo_order=None,
+    atol=1e-9,
+):
+    """
+    Make a table of the fraction [%] of jets with exact constituent agreement
+    relative to the reference algorithm, per gen-pT bin and algorithm.
+
+    Parameters
+    ----------
+    values_by_ptbin_by_algo : list[dict[str, array-like]]
+        One entry per pT bin. Each dict maps algorithm -> IoU values.
+    pt_bins : array-like
+        Bin edges for gen pT.
+    algo_labels : dict[str, str] or None
+        Optional mapping raw algorithm name -> display label.
+    atol : float
+        Absolute tolerance for deciding whether IoU is effectively 1.
+    """
+    hep.style.use("CMS")
+
+    pt_bins = np.asarray(pt_bins, dtype=float)
+
+    all_algos = set()
+    for d in values_by_ptbin_by_algo:
+        all_algos |= set(d.keys())
+
+    if algo_labels is None:
+        algo_labels = {}
+
+    if algo_order is not None:
+        all_algos = [a for a in algo_order if a in all_algos]
+    else:
+        all_algos = sorted(all_algos)
+
+    if algo_labels is None:
+        algo_labels = {}
+
+    row_labels = [
+        f"{pt_bins[i]:.0f}–{pt_bins[i+1]:.0f} GeV"
+        for i in range(len(values_by_ptbin_by_algo))
+    ]
+
+    col_labels = [algo_labels.get(algo, algo) for algo in all_algos]
+
+    cell_text = []
+    for ibin, d in enumerate(values_by_ptbin_by_algo):
+        row = []
+        for algo in all_algos:
+            vals = d.get(algo, None)
+            if vals is None:
+                row.append("—")
+                continue
+
+            vals = np.asarray(vals, dtype=float)
+            vals = vals[np.isfinite(vals)]
+
+            if vals.size == 0:
+                row.append("—")
+                continue
+
+            frac = 100.0 * np.count_nonzero(vals >= (1.0 - atol)) / vals.size
+            row.append(f"{frac:.1f}")
+        cell_text.append(row)
+
+    nrows = len(row_labels)
+    fig_h = max(2.8, 0.45 * nrows + 2.3)
+    fig_w = max(7.0, 1.35 * len(col_labels) + 2.8)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=300)
+    ax.axis("off")
+
+    tbl = ax.table(
+        cellText=cell_text,
+        rowLabels=row_labels,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+        rowLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10)
+    tbl.scale(1.0, 1.45)
+
+    # Style header
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_linewidth(0.6)
+        if r == 0:
+            cell.set_text_props(fontweight="bold")
+        if c == -1:
+            cell.set_text_props(fontweight="bold")
+
+    hep.cms.label(ax=ax, llabel=llabel, rlabel=rlabel, loc=0, fontsize=10)
+
+    if title:
+        ax.text(
+            0.0, 0.96,
+            title,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=11,
+            fontweight="bold"
+        )
+        plt.subplots_adjust(top=0.84)
+    else:
+        plt.subplots_adjust(top=0.90)
+
+    plt.savefig(outputfile, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 

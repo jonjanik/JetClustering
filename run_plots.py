@@ -20,6 +20,7 @@ from src.plotting_utils import (
 
     plot_f1_vs_threshold,
     plot_akcompat_overlay_hist_subplots,
+    plot_akcompat_exact_match_table,
     plot_eff_or_fake_vs_pt,
     plot_event_eta_phi_scatter,
 )
@@ -770,6 +771,12 @@ def run(cfg, cfg_tag: str):
                     out_ak = os.path.join(out_reg, "akcompat")
                     ensure_dir(out_ak)
 
+                    # use the same bins for the histogram and for the debug check
+                    hist_bins = np.linspace(0, 1, 21)
+
+                    # list of non-reference algos, in config order
+                    nonref_algos = [algo for algo in enabled_algos if algo != ref_alg]
+
                     # ---- (1) IoU overlays per GEN pT bin (weighted + unweighted)
                     metrics_to_plot = [
                         ("iou", "IoU (pT-weighted)"),
@@ -793,10 +800,7 @@ def run(cfg, cfg_tag: str):
                                 lo, hi = pt_bins[i], pt_bins[i + 1]
                                 values_by_algo = {}
 
-                                for algo in enabled_algos:
-                                    if algo == ref_alg:
-                                        continue
-
+                                for algo in nonref_algos:
                                     rec = load_akcompat_gen(cache_dir, inp, algo)
                                     if rec is None:
                                         continue
@@ -812,9 +816,17 @@ def run(cfg, cfg_tag: str):
                                     sel = (gpt >= lo) & (gpt < hi) & m
 
                                     vals = rec[metric_key][sel].astype(np.float32)
-                                    values_by_algo[algo] = vals[np.isfinite(vals)]
+                                    vals = vals[np.isfinite(vals)]
+
+                                    values_by_algo[algo] = vals
 
                                 values_by_ptbin_by_algo.append(values_by_algo)
+
+                            algo_label_map = {
+                                algo_name: algo_cfg.get("label", algo_name)
+                                for algo_name, algo_cfg in cfg.ALGORITHMS.items()
+                            }
+                            algo_order = list(cfg.ALGORITHMS.keys())
 
                             plot_akcompat_overlay_hist_subplots(
                                 values_by_ptbin_by_algo=values_by_ptbin_by_algo,
@@ -827,8 +839,32 @@ def run(cfg, cfg_tag: str):
                                 title=title_reco_reco(plabel, inp, ref_alg) + "\n(GEN-matched to both)",
                                 llabel=cfg.PLOT_LABELS["llabel"],
                                 rlabel=cfg.PLOT_LABELS["rlabel"],
-                                bins=np.linspace(0, 1, 25),
-                                xlim=(0, 1),
+                                bins=hist_bins,
+                                xlim=(0., 1.0),
+                                yscale="log",
+                                algo_labels=algo_label_map,
+                                # algo_order=algo_order,
+                            )
+
+                            # title should depend on weighted vs unweighted
+                            if metric_key == "iou":
+                                table_title = title_reco_reco(plabel, inp, ref_alg) + "\n% with weighted IoU ≥ 0.95 to AK"
+                            else:
+                                table_title = title_reco_reco(plabel, inp, ref_alg) + "\n% with unweighted IoU ≥ 0.95 to AK"
+
+                            plot_akcompat_exact_match_table(
+                                values_by_ptbin_by_algo=values_by_ptbin_by_algo,
+                                pt_bins=pt_bins,
+                                outputfile=os.path.join(
+                                    out_ak,
+                                    f"akcompat_exact1p0_table__{sanitize(inp)}__{sanitize(metric_key)}.png"
+                                ),
+                                title=table_title,
+                                llabel=cfg.PLOT_LABELS["llabel"],
+                                rlabel=cfg.PLOT_LABELS["rlabel"],
+                                algo_labels=algo_label_map,
+                                algo_order=algo_order,
+                                atol=0.05,
                             )
 
                         # -------------------------

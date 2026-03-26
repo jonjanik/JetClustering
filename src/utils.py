@@ -7,20 +7,92 @@ import uproot
 # -------------------------
 # Matching: greedy one-to-one (GEN->RECO)
 # -------------------------
+# def match_gen_to_reco(gen_pt, gen_eta, gen_phi,
+#                       reco_pt, reco_eta, reco_phi,
+#                       dR=0.3,
+#                       pt_gen_min=0.0,
+#                       pt_reco_min=0.0):
+#     gen_pt = np.asarray(gen_pt)
+#     gen_eta = np.asarray(gen_eta)
+#     gen_phi = np.asarray(gen_phi)
+#     reco_pt = np.asarray(reco_pt)
+#     reco_eta = np.asarray(reco_eta)
+#     reco_phi = np.asarray(reco_phi)
+
+#     gen_sel = (gen_pt >= pt_gen_min)
+#     reco_sel = (reco_pt >= pt_reco_min)
+
+#     gen_idx_all = np.where(gen_sel)[0]
+#     reco_idx_all = np.where(reco_sel)[0]
+
+#     if len(gen_idx_all) == 0 or len(reco_idx_all) == 0:
+#         return [], gen_idx_all.tolist(), reco_idx_all.tolist()
+
+#     gen_sorted = gen_idx_all[np.argsort(gen_pt[gen_idx_all])[::-1]]
+
+#     used_reco = set()
+#     matched = []
+#     thr2 = dR * dR
+
+#     reco_phi_sel = reco_phi[reco_idx_all]
+#     reco_eta_sel = reco_eta[reco_idx_all]
+
+#     for ig in gen_sorted:
+#         dphi = np.arctan2(np.sin(reco_phi_sel - gen_phi[ig]),
+#                           np.cos(reco_phi_sel - gen_phi[ig]))
+#         deta = reco_eta_sel - gen_eta[ig]
+#         dr2 = deta * deta + dphi * dphi
+
+#         jbest = int(np.argmin(dr2))
+#         if dr2[jbest] >= thr2:
+#             continue
+
+#         ir = int(reco_idx_all[jbest])
+#         if ir in used_reco:
+#             continue
+
+#         used_reco.add(ir)
+#         dr = float(np.sqrt(dr2[jbest]))
+#         gpt = float(gen_pt[ig])
+#         rpt = float(reco_pt[ir])
+
+#         matched.append({
+#             "gen_idx": int(ig),
+#             "reco_idx": int(ir),
+#             "gen_pt": gpt,
+#             "gen_eta": float(gen_eta[ig]),
+#             "gen_phi": float(gen_phi[ig]),
+#             "reco_pt": rpt,
+#             "reco_eta": float(reco_eta[ir]),
+#             "reco_phi": float(reco_phi[ir]),
+#             "dr": dr,
+#             "resp": float(rpt / max(gpt, 1e-6)),
+#             "dpt_rel": float((rpt - gpt) / max(gpt, 1e-6)),
+#         })
+
+#     matched_gen = {m["gen_idx"] for m in matched}
+#     matched_reco = {m["reco_idx"] for m in matched}
+
+#     unmatched_gen = [int(i) for i in gen_idx_all if int(i) not in matched_gen]
+#     unmatched_reco = [int(i) for i in reco_idx_all if int(i) not in matched_reco]
+
+#     return matched, unmatched_gen, unmatched_reco
+
+
 def match_gen_to_reco(gen_pt, gen_eta, gen_phi,
                       reco_pt, reco_eta, reco_phi,
                       dR=0.3,
                       pt_gen_min=0.0,
                       pt_reco_min=0.0):
-    gen_pt = np.asarray(gen_pt)
-    gen_eta = np.asarray(gen_eta)
-    gen_phi = np.asarray(gen_phi)
-    reco_pt = np.asarray(reco_pt)
-    reco_eta = np.asarray(reco_eta)
-    reco_phi = np.asarray(reco_phi)
+    gen_pt = np.asarray(gen_pt, dtype=float)
+    gen_eta = np.asarray(gen_eta, dtype=float)
+    gen_phi = np.asarray(gen_phi, dtype=float)
+    reco_pt = np.asarray(reco_pt, dtype=float)
+    reco_eta = np.asarray(reco_eta, dtype=float)
+    reco_phi = np.asarray(reco_phi, dtype=float)
 
-    gen_sel = (gen_pt >= pt_gen_min)
-    reco_sel = (reco_pt >= pt_reco_min)
+    gen_sel = (gen_pt >= float(pt_gen_min))
+    reco_sel = (reco_pt >= float(pt_reco_min))
 
     gen_idx_all = np.where(gen_sel)[0]
     reco_idx_all = np.where(reco_sel)[0]
@@ -32,26 +104,25 @@ def match_gen_to_reco(gen_pt, gen_eta, gen_phi,
 
     used_reco = set()
     matched = []
-    thr2 = dR * dR
-
-    reco_phi_sel = reco_phi[reco_idx_all]
-    reco_eta_sel = reco_eta[reco_idx_all]
+    thr2 = float(dR) * float(dR)
 
     for ig in gen_sorted:
-        dphi = np.arctan2(np.sin(reco_phi_sel - gen_phi[ig]),
-                          np.cos(reco_phi_sel - gen_phi[ig]))
-        deta = reco_eta_sel - gen_eta[ig]
+        available = np.array([ir for ir in reco_idx_all if int(ir) not in used_reco], dtype=int)
+        if available.size == 0:
+            break
+
+        dphi = np.arctan2(np.sin(reco_phi[available] - gen_phi[ig]),
+                          np.cos(reco_phi[available] - gen_phi[ig]))
+        deta = reco_eta[available] - gen_eta[ig]
         dr2 = deta * deta + dphi * dphi
 
         jbest = int(np.argmin(dr2))
-        if dr2[jbest] >= thr2:
+        if float(dr2[jbest]) >= thr2:
             continue
 
-        ir = int(reco_idx_all[jbest])
-        if ir in used_reco:
-            continue
-
+        ir = int(available[jbest])
         used_reco.add(ir)
+
         dr = float(np.sqrt(dr2[jbest]))
         gpt = float(gen_pt[ig])
         rpt = float(reco_pt[ir])
@@ -78,19 +149,89 @@ def match_gen_to_reco(gen_pt, gen_eta, gen_phi,
 
     return matched, unmatched_gen, unmatched_reco
 
+
 # -------------------------
 # Matching: greedy one-to-one (RECO->GEN)
 # -------------------------
+# def match_reco_to_gen(reco_pt, reco_eta, reco_phi,
+#                       gen_pt, gen_eta, gen_phi,
+#                       dR=0.3,
+#                       pt_reco_min=0.0,
+#                       pt_gen_min=0.0):
+#     """
+#     Greedy one-to-one matching driven by RECO jets (descending pT).
+#     Useful for RECO-side purity/fake diagnostics.
+#     Returns: matched_records(list), unmatched_reco(list), unmatched_gen(list)
+#     """
+#     reco_pt = np.asarray(reco_pt, dtype=float)
+#     reco_eta = np.asarray(reco_eta, dtype=float)
+#     reco_phi = np.asarray(reco_phi, dtype=float)
+
+#     gen_pt = np.asarray(gen_pt, dtype=float)
+#     gen_eta = np.asarray(gen_eta, dtype=float)
+#     gen_phi = np.asarray(gen_phi, dtype=float)
+
+#     reco_sel = (reco_pt >= float(pt_reco_min))
+#     gen_sel = (gen_pt >= float(pt_gen_min))
+
+#     reco_idx_all = np.where(reco_sel)[0]
+#     gen_idx_all = np.where(gen_sel)[0]
+
+#     if len(reco_idx_all) == 0 or len(gen_idx_all) == 0:
+#         return [], reco_idx_all.tolist(), gen_idx_all.tolist()
+
+#     reco_sorted = reco_idx_all[np.argsort(reco_pt[reco_idx_all])[::-1]]
+
+#     used_gen = set()
+#     matched = []
+#     thr2 = float(dR) * float(dR)
+
+#     gen_phi_sel = gen_phi[gen_idx_all]
+#     gen_eta_sel = gen_eta[gen_idx_all]
+
+#     for ir in reco_sorted:
+#         dphi = np.arctan2(np.sin(gen_phi_sel - reco_phi[ir]),
+#                           np.cos(gen_phi_sel - reco_phi[ir]))
+#         deta = gen_eta_sel - reco_eta[ir]
+#         dr2 = deta * deta + dphi * dphi
+
+#         jbest = int(np.argmin(dr2))
+#         if float(dr2[jbest]) >= thr2:
+#             continue
+
+#         ig = int(gen_idx_all[jbest])
+#         if ig in used_gen:
+#             continue
+
+#         used_gen.add(ig)
+#         dr = float(np.sqrt(dr2[jbest]))
+
+#         matched.append({
+#             "reco_idx": int(ir),
+#             "gen_idx": int(ig),
+#             "reco_pt": float(reco_pt[ir]),
+#             "reco_eta": float(reco_eta[ir]),
+#             "reco_phi": float(reco_phi[ir]),
+#             "gen_pt": float(gen_pt[ig]),
+#             "gen_eta": float(gen_eta[ig]),
+#             "gen_phi": float(gen_phi[ig]),
+#             "dr": dr,
+#         })
+
+#     matched_reco = {m["reco_idx"] for m in matched}
+#     matched_gen = {m["gen_idx"] for m in matched}
+
+#     unmatched_reco = [int(i) for i in reco_idx_all if int(i) not in matched_reco]
+#     unmatched_gen = [int(i) for i in gen_idx_all if int(i) not in matched_gen]
+
+#     return matched, unmatched_reco, unmatched_gen
+
+
 def match_reco_to_gen(reco_pt, reco_eta, reco_phi,
                       gen_pt, gen_eta, gen_phi,
                       dR=0.3,
                       pt_reco_min=0.0,
                       pt_gen_min=0.0):
-    """
-    Greedy one-to-one matching driven by RECO jets (descending pT).
-    Useful for RECO-side purity/fake diagnostics.
-    Returns: matched_records(list), unmatched_reco(list), unmatched_gen(list)
-    """
     reco_pt = np.asarray(reco_pt, dtype=float)
     reco_eta = np.asarray(reco_eta, dtype=float)
     reco_phi = np.asarray(reco_phi, dtype=float)
@@ -114,23 +255,21 @@ def match_reco_to_gen(reco_pt, reco_eta, reco_phi,
     matched = []
     thr2 = float(dR) * float(dR)
 
-    gen_phi_sel = gen_phi[gen_idx_all]
-    gen_eta_sel = gen_eta[gen_idx_all]
-
     for ir in reco_sorted:
-        dphi = np.arctan2(np.sin(gen_phi_sel - reco_phi[ir]),
-                          np.cos(gen_phi_sel - reco_phi[ir]))
-        deta = gen_eta_sel - reco_eta[ir]
+        available = np.array([ig for ig in gen_idx_all if int(ig) not in used_gen], dtype=int)
+        if available.size == 0:
+            break
+
+        dphi = np.arctan2(np.sin(gen_phi[available] - reco_phi[ir]),
+                          np.cos(gen_phi[available] - reco_phi[ir]))
+        deta = gen_eta[available] - reco_eta[ir]
         dr2 = deta * deta + dphi * dphi
 
         jbest = int(np.argmin(dr2))
         if float(dr2[jbest]) >= thr2:
             continue
 
-        ig = int(gen_idx_all[jbest])
-        if ig in used_gen:
-            continue
-
+        ig = int(available[jbest])
         used_gen.add(ig)
         dr = float(np.sqrt(dr2[jbest]))
 
