@@ -1,18 +1,15 @@
-# example_config.py 
+# configs/test.py 
 import numpy as np
 
 # -----------------------------
 # Processes (samples)
 # -----------------------------
 PROCESSES = {
-    "ttbar": {
-        "path": "data/TT_PU200/l1Nano_merged.root",
-        "label": r"$\mathrm{t}\bar{\mathrm{t}}$",
-    },
-    "caseA": {
-        "path": "data/caseA/l1Nano_merged.root",
-        "label": r"MSJ case A",
-    },
+    # "ttbar": {
+    #     "path": "data/TT_PU200/l1Nano_merged.root",
+    #     "label": r"$\mathrm{t}\bar{\mathrm{t}}$",
+    # },
+    "MSJ": {"path": "data/caseC/l1Nano_merged.root", "label": "MSJ caseC"},
 }
 
 TREE_NAME = "Events"
@@ -21,7 +18,7 @@ TREE_NAME = "Events"
 # Runtime control
 # -----------------------------
 RUNTIME = {
-    "max_events": None,
+    "max_events": 1000,  # None,
     "event_sampling": "head",
     "stride": 1,
     "use_tqdm": True,
@@ -89,60 +86,64 @@ INPUTS = {
 # Jet algorithms
 # -----------------------------
 ALGORITHMS = {
-    "AntiKt": {   #reference
+    "SeededConeGreedy16": {
         "enabled": True,
-        "fn": "antikt",
-        "params": {"R_clu": 0.4, "pt_min": 0.0},
-        "label": r"anti-k_{\mathrm{T}}",
+        "fn": "seeded_cone_greedy",
+        "params": {"R_clu": 0.4, "nseeds": 16},
+        "label": "SCGreedy16",
     },
-
-    # SC family
-    "SeededConeGreedy": {   #greedy (iterative) constituent assignment!
-        "enabled": False,
+    "SeededConeGreedy1024": {
+        "enabled": True,
         "fn": "seeded_cone_greedy",
         "params": {"R_clu": 0.4, "nseeds": 1024},
-        "label": "SeededConeGreedy",
+        "label": "SCGreedy1024",
     },
     "SeededConeNMS": {
         "enabled": True,
         "fn": "seeded_cone_nms",
-        "params": {"R_seed": 0.33, "R_cen": 0.4, "R_clu": 0.4},
-        "label": "SeededConeNMS",
+        "params": {"R_seed": 0.3, "R_cen": 0.4, "R_clu": 0.4},
+        "label": "SCNMS",
     },
     "SeededConeNMSWeighted": {
         "enabled": True,
         "fn": "seeded_cone_nms_weighted",
         "params": {"R_seed": 0.3, "R_cen": 0.4, "R_clu": 0.4, "alpha_seed": 2.0},
-        "label": "SeededConeNMSWeighted",
+        "label": "SCNMSWeighted",
+    },
+    "AntiKt": {
+        "enabled": True,
+        "fn": "antikt",
+        "params": {"R_clu": 0.4, "pt_min": 0.0},
+        "label": "Anti-kT",
     },
 
-    # Simplified CLUE-like "nearest higher-pT link" family
     "LinkTree": {
         "enabled": True,
         "fn": "linktree",
         "params": {"R_link": 0.3, "pt_min": 0.0},
         "label": "LinkTree",
     },
-    "LinkSeedCone": {   #greedy (iterative) constituent assignment!
+
+    "LinkSeedCone": {
         "enabled": False,
         "fn": "linkseed_cone",
         "params": {"R_link": 0.3, "R_jet": 0.4, "pt_min": 0.0},
         "label": "LinkSeedCone",
     },
-    "LinkBaryCone": {   #greedy (iterative) constituent assignment!
+    "LinkBaryCone": {
         "enabled": False,
         "fn": "linkbary_cone",
         "params": {"R_link": 0.3, "R_jet": 0.4, "pt_min": 0.0},
         "label": "LinkBaryCone",
     },
     "LinkCentroidNearest": {
-        "enabled": True,
+        "enabled": False,
         "fn": "link_centroid_nearest",
         "params": {"R_link": 0.3, "R_cen": 0.4, "R_clu": 0.4, "pt_min": 0.0},
         "label": "LinkCentroidNearest",
     },
     "LinkCentroidNearestWeighted": {
-        "enabled": True,
+        "enabled": False,
         "fn": "link_centroid_nearest_weighted",
         "params": {
             "R_link": 0.3, "R_cen": 0.4, "R_clu": 0.4, "pt_min": 0.0,
@@ -151,7 +152,7 @@ ALGORITHMS = {
         "label": "LinkCentroidNearestWeighted",
     },
     "LinkBaryNearestWeighted": {
-        "enabled": True,
+        "enabled": False,
         "fn": "linkbary_nearest_weighted",
         "params": {
             "R_link": 0.3, "R_jet": 0.4, "pt_min": 0.0,
@@ -169,26 +170,29 @@ ALGORITHMS = {
 STUDIES = {
     "efficiency": True,
     "response_ridgeline": True,
-    "ak4_agreement": False,
-    "violin_response": False,   # redundant
+    # "ak4_agreement": False,
+    # "violin_response": False,
 
     # reco-side / rate-proxy / stability diagnostics
-    "purity_vs_ptreco": True,           # reco->gen match fraction vs pT^RECO
+    "purity_vs_ptreco": True,          # reco->gen match fraction vs pT^RECO
     "fake_rate_vs_ptreco": False,       # 1 - purity
-    "njet_multiplicity": True,         # per-event N(jets) above thresholds
-    "ht_distributions": True,          # per-event HT above thresholds
+    "njet_multiplicity": False,         # per-event N(jets) above thresholds
+    "ht_distributions": False,          # per-event HT above thresholds
 
     # response summaries (median + quantiles) vs pT^GEN
-    "response_quantiles": False,
+    "response_quantiles": True,
 
     # dr summaries (quantiles) vs pT^GEN
     "dr_quantiles": False,
 
     # trigger turn-ons: P(pT^RECO > T | GEN jet in bin)
-    "turnons": False,
+    # "turnons": False,
+
+    # split/merge neighborhood diagnostics (counts within R_near)
+    # "split_merge": False,
 
     # seed statistics (for algos that produce seed_mask)
-    "seed_stats": False,
+    # "seed_stats": True,
 
     # F-score vs threshold 
     "f1": False,
@@ -203,12 +207,12 @@ AK_COMPAT = {
     # Reference algorithm name (per INPUT). Must be enabled in ALGORITHMS.
     "ref_algo": "AntiKt",
 
-    "dR_match": 0.3,
+    "dR_match": 0.4,
 
-    # pT binning on reference jet pT (AK for that same input)
-    "pt_bins": np.array([0, 20, 40, 60, 80, 100, 150, 200, 300], dtype=float),
+    # pT binning on gen jet pT (AK for that same input)
+    "pt_bins": np.array([10, 20, 40, 80, 160, 300], dtype=float),
 
-    # "iou" (intersection over union) | "f_ref" | "f_alt"
+    # "iou" | "f_ref" | "f_alt"
     "metric": "iou",
 }
 
@@ -216,8 +220,8 @@ AK_COMPAT = {
 # Matching / selections
 # -----------------------------
 MATCHING = {
-    "dR_match": 0.3,
-    "pt_gen_min": 0.0,
+    "dR_match": 0.4,
+    "pt_gen_min": 0.0, #10GeV prefiltered, check
     "pt_reco_min": 0.0,
 }
 
@@ -225,9 +229,9 @@ MATCHING = {
 # Region split (optional) - ALWAYS includes Inclusive
 # -----------------------------
 REGION_SPLIT = {
-    "enabled": True,
+    "enabled": False,
     "definitions": {
-        "Inclusive": lambda eta: np.ones_like(eta, dtype=bool),
+        "Inclusive": lambda eta: np.abs(eta) < 2.4, #np.ones_like(eta, dtype=bool),
         "Barrel":    lambda eta: (np.abs(eta) < 1.52),
         "Endcap":    lambda eta: (np.abs(eta) >= 1.52) & (np.abs(eta) < 2.4),
     }
@@ -237,7 +241,7 @@ REGION_SPLIT = {
 # Z split (optional)
 # -----------------------------
 Z_SPLIT = {
-    "enabled": True,
+    "enabled": False,
     "dz_cm": 1.0,
 }
 
@@ -246,21 +250,28 @@ Z_SPLIT = {
 # -----------------------------
 PT_BINS = {
     "efficiency": np.linspace(0, 100, 41),
-    "ridgeline":  np.array([0, 20, 40, 60, 80, 100, 150, 200, 300]),
-    "violin":     np.array([0, 20, 40, 60, 80, 100, 150, 200, 300]),
+    "ridgeline":  np.array([10, 15, 20, 30, 50, 80, 120]),
+    # "violin":     np.array([10, 15, 20, 30, 50, 80, 120]),
 
     # pT^RECO binning for purity/fake
     "purity":     np.linspace(0, 300, 41),
 
     # thresholds for multiplicity/HT and turn-ons
-    "jet_thresholds": np.array([0, 10, 20, 30, 40, 50], dtype=float),
-    "ht_thresholds":  np.array([0, 10, 20, 30, 40, 50], dtype=float),
+    "jet_thresholds": np.array([0, 10, 20, 30, 40, 50, 100, 200, 300], dtype=float),
+    "ht_thresholds":  np.array([0, 10, 20, 30, 40, 50, 100, 200, 300], dtype=float),
     "turnon_thresholds": np.array([30, 40, 50], dtype=float),
 
     # pT^GEN binning for quantile summaries / turn-ons (reuse efficiency bins by default)
-    "summary_gen": np.linspace(0, 300, 31),
+    "summary_gen": np.linspace(0, 120, 31),
 
     "f1_thresholds": np.array([0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=float),
+}
+
+# -----------------------------
+# Split/merge neighborhood radius (diagnostic only)
+# -----------------------------
+DIAGNOSTICS = {
+    "R_near": 0.4,   # cone to count "nearby" jets for split/merge
 }
 
 # -----------------------------

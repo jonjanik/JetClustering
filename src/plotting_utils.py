@@ -119,7 +119,7 @@ def plot_efficiencies_single_region(
 
     if extra_text:
         ax.text(
-            0.03, 0.88, extra_text,
+            0.85, 0.9, extra_text,
             transform=ax.transAxes,
             fontsize=18
         )

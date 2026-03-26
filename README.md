@@ -1,69 +1,138 @@
 ## Overview
 
-This repository provides:
-- A pluggable jet clustering backend supporting multiple categories of algorithms (extentable)
-- A config-driven processing pipeline to run clustering, matching, and metric extraction
-- A cache-based workflow separating heavy processing from fast plotting
-- A comprehensive plotting suite for efficiency, response, purity/fake rates, event-level observables, and algorithm agreement
+This repository provides a modular framework for developing and evaluating jet clustering algorithms in the context of CMS Phase-2 L1 Scouting.
 
-The framework is intended for research and development of jet clustering algorithms, including classical cone-based approaches, simplified CLUE-like linking methods, and reference anti-kT clustering.
+Key features:
+- Pluggable clustering backend supporting multiple algorithm families (easily extensible)
+- Three-step pipeline separating clustering, studies, and plotting
+- Snapshot-based workflow for reproducibility and fast iteration
+- Cache-driven analysis layer decoupling heavy computation from visualization
+- Comprehensive plotting suite for performance and physics validation
+
+The framework is designed for algorithm R&D, including:
+- cone-based approaches (SeededCone variants)
+- link-based / CLUE-inspired methods
+- reference clustering (anti-kT)
+
+---
 
 ## Workflow
 
-The framework follows a two-step workflow.
+The framework follows a three-step pipeline:
 
-### Processing
+### 1. Clustering
 
-- Load ROOT files via uproot
+- Load input ROOT files (via uproot)
 - Run selected clustering algorithms
-- Perform GEN↔RECO and RECO↔RECO matching
-- Compute per-jet and per-event observables
-- Write compact .npz cache files
+- Store outputs in a snapshot ROOT file
 
-python run_processing.py --config configs/example_config.py
+python run_clustering.py --config test.py
 
-### Plotting
+Output:
+outputs/<config_tag>/<sample>/snapshot/clustered_events.root
 
-- Read cached outputs
-- Produce diagnostic plots
+---
 
-python run_plots.py --config configs/example_config.py
+### 2. Studies
 
-## Supported Algorithm Families
+- Read snapshot
+- Perform matching:
+  - GEN ↔ RECO
+  - RECO ↔ RECO
+- Compute:
+  - jet-level metrics
+  - event-level observables
+- Write compact .npz caches
 
-Reference:
-- anti-kT (FastJet)
+python run_studies.py --config test.py
 
-Seeded cone
+Output:
+outputs/<config_tag>/<sample>/studies/cache/
 
-Link-based / CLUE-inspired
+---
 
-All algorithms are registered via a central registry and can be enabled or disabled purely through configuration.
+### 3. Plotting
+
+- Read cached study outputs
+- Produce diagnostic and comparison plots
+
+python run_plotting.py --config test.py
+
+Output:
+outputs/<config_tag>/<sample>/plots/
+
+---
+
+## Algorithm Support
+
+Supported algorithm families:
+
+- Reference
+  - anti-kT (FastJet)
+
+- Seeded cone
+  - Greedy / NMS / weighted variants
+
+- Link-based / CLUE-inspired
+  - LinkTree and related variants
+
+All algorithms are registered centrally and controlled entirely via configuration.
+
+---
 
 ## Matching and Metrics
 
-The framework includes:
-- Greedy one-to-one GEN→RECO, RECO→GEN, and RECO→RECO matching
-- Jet response and resolution metrics
-- pT-weighted and unweighted constituent overlap (IoU)
-- Event-level observables: jet multiplicities, HT, seed statistics
-- Algorithm agreement with a reference clustering (anti-kT).
+The framework provides:
+
+- Greedy one-to-one matching:
+  - GEN → RECO
+  - RECO → GEN
+  - RECO → RECO
+
+- Performance metrics:
+  - Efficiency vs pT
+  - Jet response and resolution
+  - ΔR matching
+
+- Constituent-based comparisons:
+  - pT-weighted overlap (IoU-like)
+  - unweighted overlap
+
+- Event-level observables:
+  - jet multiplicity
+  - HT
+  - seed statistics
+
+- Algorithm agreement:
+  - comparison to reference clustering (e.g. anti-kT)
+
+---
 
 ## Configuration
 
-All behavior is controlled via Python configuration files:
+All behavior is controlled via Python config files:
+
 - Input datasets and branches
-- Enabled inputs (PF, PUPPI, etc.)
+- Enabled inputs (e.g. PF, PUPPI)
 - Enabled algorithms and parameters
-- Matching thresholds
+- Matching configuration
 - Studies to run
 - Plot styles and binning
 
-Start from configs/example_config.py and extend as needed.
+Configs are resolved automatically from:
+configs/<name>.py
+
+Example:
+python run_clustering.py --config test.py
+
+Start from:
+configs/example_config.py
+
+---
 
 ## Dependencies
 
-Core dependencies:
+Core:
 - Python ≥ 3.9
 - numpy
 - awkward
@@ -71,26 +140,53 @@ Core dependencies:
 - matplotlib
 
 Optional:
-- fastjet (for anti-kT)
+- fastjet (for anti-kT reference)
 - tqdm (progress bars)
 
-## Data Handling
+---
+
+## Data and Outputs
 
 - Input ROOT files are not tracked
-- The data/ directory is a placeholder for local datasets
-- All outputs are written to outputs/<config_tag>/
+- data/ is a placeholder for local datasets
+- All outputs are written to:
+outputs/<config_tag>/
+
+Structure:
+snapshot/   → clustering output (ROOT)
+studies/    → cached metrics (.npz)
+plots/      → figures
+
+---
+
+## Design Principles
+
+- Separation of concerns (clustering vs analysis vs plotting)
+- Reproducibility via snapshot + config
+- Flexibility via config-driven design
+- Transparency over implicit behavior
+
+---
 
 ## License
 
-This project is licensed under the Apache License 2.0.
+Apache License 2.0
+
+---
 
 ## Citation
 
-If you use this framework in a study or publication, please cite the repository and reference the relevant analysis or thesis where appropriate.
+If you use this framework in a study or publication, please cite the repository and reference the corresponding analysis or thesis where applicable.
+
+---
 
 ## Notes
 
-This is a research framework, not a production reconstruction package.
-Correctness, determinism, and transparency are prioritized over raw performance.
+This is a research-oriented framework, not a production reconstruction package.
 
-Contributions and algorithmic extensions are welcome.
+The focus is on:
+- correctness
+- interpretability
+- rapid prototyping of new algorithms
+
+Performance optimization (e.g. GPU backends) is considered separately from the analysis layer.

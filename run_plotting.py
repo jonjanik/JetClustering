@@ -1,80 +1,73 @@
-# run_plots.py
+# run_plotting.py
 import os
 import argparse
-import importlib.util
 import numpy as np
 
-from src.utils import ensure_dir, load_arrays
+from src.config_utils import (
+    load_cfg_from_path,
+    config_tag_from_path,
+    sanitize,
+    enabled_inputs,
+    enabled_algo_names,
+    snapshot_file_path,
+    snapshot_tree_name,
+    snapshot_branch_name_cand,
+    cache_dir_path,
+    plots_dir_path,
+    resolve_config_path,
+)
+from src.utils import ensure_dir, load_arrays, wrap_phi_np
 from src.plotting_utils import (
     plot_efficiencies_single_region,
     plot_ridgeline,
     plot_agreement_fraction_hist,
     plot_violin_response,
-
     plot_purity_or_fake_vs_ptreco,
     plot_multiplicity_hist,
     plot_ht_hist,
     plot_quantiles_vs_ptgen,
     plot_quantiles_vs_ptgen_overlay,
     plot_turnon_curves,
-
     plot_f1_vs_threshold,
     plot_akcompat_overlay_hist_subplots,
     plot_akcompat_exact_match_table,
-    plot_eff_or_fake_vs_pt,
     plot_event_eta_phi_scatter,
 )
 
-def load_cfg_from_path(cfg_path: str):
-    cfg_path = os.path.abspath(cfg_path)
-    if not os.path.exists(cfg_path):
-        raise FileNotFoundError(f"Config not found: {cfg_path}")
-    spec = importlib.util.spec_from_file_location("user_cfg", cfg_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load config: {cfg_path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-def config_tag_from_path(cfg_path: str) -> str:
-    base = os.path.basename(cfg_path)
-    if base.endswith(".py"):
-        base = base[:-3]
-    return base
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Make plots from cached processing outputs.")
-    ap.add_argument("--config", "-c", default="config.py",
-                    help="Path to config file, e.g. configs/example_config.py (default: config.py)")
+    ap = argparse.ArgumentParser(description="Make plots from run_studies caches.")
+    ap.add_argument(
+        "--config", "-c", default="config.py",
+        help="Config file (auto-resolves from configs/ if not found locally)"
+    )
     return ap.parse_args()
 
-def sanitize(s: str) -> str:
-    return (
-        s.replace(" ", "_")
-         .replace("/", "_")
-         .replace("(", "")
-         .replace(")", "")
-         .replace(",", "")
-         .replace("=", "")
-         .replace("|", "")
-         .replace("≥", "ge")
-         .replace("<", "lt")
-         .replace(".", "p")
-    )
 
 def resolve_eff_style(cfg, input_name, algo_name, curve_key, fallback_index):
     if curve_key in getattr(cfg, "EFF_STYLE_KEY_MAP", {}):
         st = cfg.EFF_STYLE_KEY_MAP[curve_key]
-        return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), st.get("label", curve_key)
+        return (
+            st.get("marker", "o"),
+            st.get("color", "black"),
+            st.get("mfc", "none"),
+            st.get("label", curve_key),
+        )
 
     if (input_name, algo_name) in getattr(cfg, "EFF_STYLE_MAP", {}):
         st = cfg.EFF_STYLE_MAP[(input_name, algo_name)]
-        return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), st.get("label", cfg.ALGORITHMS.get(algo_name, {}).get("label", algo_name))
+        return (
+            st.get("marker", "o"),
+            st.get("color", "black"),
+            st.get("mfc", "none"),
+            st.get("label", cfg.ALGORITHMS.get(algo_name, {}).get("label", algo_name)),
+        )
 
     defaults = getattr(cfg, "EFF_STYLE_DEFAULTS", [{"marker": "o", "color": "black", "mfc": "none"}])
     st = defaults[fallback_index % len(defaults)]
     algo_label = cfg.ALGORITHMS.get(algo_name, {}).get("label", algo_name)
     return st.get("marker", "o"), st.get("color", "black"), st.get("mfc", "none"), algo_label
+
 
 def load_matches(cache_dir, inp, algo):
     f = os.path.join(cache_dir, f"matches__{sanitize(inp)}__{sanitize(algo)}.npz")
@@ -82,40 +75,60 @@ def load_matches(cache_dir, inp, algo):
         raise RuntimeError(f"Missing match cache: {f}")
     return np.load(f)
 
+
 def load_denoms(cache_dir):
     f = os.path.join(cache_dir, "denom_genjets.npz")
     if not os.path.exists(f):
-        raise RuntimeError(f"Missing denom cache: {f} (run run_processing.py first)")
+        raise RuntimeError(f"Missing denom cache: {f} (run run_studies.py first)")
     return np.load(f)
+
 
 def load_recomatch(cache_dir, inp, algo):
     f = os.path.join(cache_dir, f"recomatch__{sanitize(inp)}__{sanitize(algo)}.npz")
     if not os.path.exists(f):
-        raise RuntimeError(f"Missing recomatch cache: {f} (run run_processing.py first)")
+        raise RuntimeError(f"Missing recomatch cache: {f} (run run_studies.py first)")
     return np.load(f)
+
 
 def load_event_metrics(cache_dir, inp, algo):
     f = os.path.join(cache_dir, f"event_metrics__{sanitize(inp)}__{sanitize(algo)}.npz")
     if not os.path.exists(f):
-        raise RuntimeError(f"Missing event_metrics cache: {f} (run run_processing.py first)")
+        raise RuntimeError(f"Missing event_metrics cache: {f} (run run_studies.py first)")
     return np.load(f)
 
 
+def load_akcompat(cache_dir, inp, algo):
+    f = os.path.join(cache_dir, f"akcompat__{sanitize(inp)}__{sanitize(algo)}.npz")
+    return np.load(f) if os.path.exists(f) else None
+
+
+def load_akmatch_ref(cache_dir, inp, algo):
+    f = os.path.join(cache_dir, f"akmatch_ref__{sanitize(inp)}__{sanitize(algo)}.npz")
+    return np.load(f) if os.path.exists(f) else None
+
+
+def load_akmatch_alt(cache_dir, inp, algo):
+    f = os.path.join(cache_dir, f"akmatch_alt__{sanitize(inp)}__{sanitize(algo)}.npz")
+    return np.load(f) if os.path.exists(f) else None
+
+
+def load_akcompat_gen(cache_dir, inp, algo):
+    f = os.path.join(cache_dir, f"akcompat_gen__{sanitize(inp)}__{sanitize(algo)}.npz")
+    return np.load(f) if os.path.exists(f) else None
+
+
 def get_region_defs(cfg):
-    # Always have an explicit inclusive region label
     base = {"Inclusive GEN jet eta": lambda eta: np.abs(eta) < 2.4}
 
     if getattr(cfg, "REGION_SPLIT", {}).get("enabled", True):
         defs = dict(getattr(cfg, "REGION_SPLIT", {}).get("definitions", {}))
-
-        # If user already defined something called "Inclusive", drop/override it to avoid ambiguity
         if "Inclusive" in defs:
             defs.pop("Inclusive")
-
         defs["Inclusive Gen jet eta"] = base["Inclusive GEN jet eta"]
         return defs
 
     return base
+
 
 def get_zcat_defs(cfg):
     cats = {"Inclusive dz": lambda dz_cat: np.ones_like(dz_cat, dtype=bool)}
@@ -127,6 +140,7 @@ def get_zcat_defs(cfg):
 
     return cats
 
+
 def _title_lines(proc_label, region_name, zcat_name, extra=None):
     lines = [proc_label]
     if extra:
@@ -135,6 +149,7 @@ def _title_lines(proc_label, region_name, zcat_name, extra=None):
     if zcat_name != "Inclusive":
         lines.append(zcat_name)
     return "\n".join(lines)
+
 
 def _bin_quantiles(x, y, bins, q=(16, 50, 84)):
     x = np.asarray(x, dtype=float)
@@ -155,6 +170,7 @@ def _bin_quantiles(x, y, bins, q=(16, 50, 84)):
 
     return centers, qvals
 
+
 def _eff_and_err(num, den):
     num = np.asarray(num, dtype=float)
     den = np.asarray(den, dtype=float)
@@ -164,55 +180,18 @@ def _eff_and_err(num, den):
     err[ok] = np.sqrt(eff[ok] * (1.0 - eff[ok]) / den[ok])
     return eff, err
 
-def load_akcompat(cache_dir, inp, algo):
-    f = os.path.join(cache_dir, f"akcompat__{sanitize(inp)}__{sanitize(algo)}.npz")
-    return np.load(f) if os.path.exists(f) else None
-
-def load_akmatch_ref(cache_dir, inp, algo):
-    f = os.path.join(cache_dir, f"akmatch_ref__{sanitize(inp)}__{sanitize(algo)}.npz")
-    return np.load(f) if os.path.exists(f) else None
-
-def load_akmatch_alt(cache_dir, inp, algo):
-    f = os.path.join(cache_dir, f"akmatch_alt__{sanitize(inp)}__{sanitize(algo)}.npz")
-    return np.load(f) if os.path.exists(f) else None
-
-def load_akcompat_gen(cache_dir, inp, algo):
-    f = os.path.join(cache_dir, f"akcompat_gen__{sanitize(inp)}__{sanitize(algo)}.npz")
-    return np.load(f) if os.path.exists(f) else None
-
-
 
 def title_reco_reco(proc_label, input_name, ref_algo):
-    """
-    Clean title for reco–reco (AK-compat) comparisons.
-    No region/zcat text.
-    """
     return f"{proc_label}\n{input_name} (ref: {ref_algo})"
 
 
-def wrap_phi_np(phi):
-    return (phi + np.pi) % (2 * np.pi) - np.pi
-
-
-def event_scatter_branch_list(cfg, enabled_inputs):
-    bl = []
-    for inp in enabled_inputs:
-        cdef = cfg.BRANCHES["cands"][inp]
-        bl.extend([cdef["pt"], cdef["eta"], cdef["phi"]])
-    return sorted(set(bl))
-
-
 def run(cfg, cfg_tag: str):
-    out_root = os.path.join(getattr(cfg, "OUTDIR", "outputs"), cfg_tag)
-    ensure_dir(out_root)
-
-    enabled_inputs = [k for k, v in cfg.INPUTS.items() if v]
-    enabled_algos = [name for name, a in cfg.ALGORITHMS.items() if a.get("enabled", False)]
+    enabled_inps = enabled_inputs(cfg)
+    enabled_algos = enabled_algo_names(cfg)
 
     region_defs = get_region_defs(cfg)
     zcat_defs = get_zcat_defs(cfg)
 
-    # F1 thresholds (optional). If not set, reuse jet_thresholds
     f1_thresholds = cfg.PT_BINS.get("f1_thresholds", None)
     if f1_thresholds is None:
         f1_thresholds = cfg.PT_BINS.get("jet_thresholds", np.array([20, 30, 40, 50], dtype=float))
@@ -221,14 +200,26 @@ def run(cfg, cfg_tag: str):
     for proc, pinfo in cfg.PROCESSES.items():
         plabel = pinfo.get("label", proc)
 
-        out_proc = os.path.join(out_root, proc)
-        cache_dir = os.path.join(out_proc, "cache")
-        if not os.path.isdir(cache_dir):
-            raise RuntimeError(f"Cache directory not found: {cache_dir}. Run run_processing.py with the same --config.")
+        cache_dir = cache_dir_path(cfg, cfg_tag, proc)
+        plots_root = plots_dir_path(cfg, cfg_tag, proc)
+        ensure_dir(plots_root)
 
-        # ---------------- Event scatter plots (PF / PUPPI first N events) ----------------
+        if not os.path.isdir(cache_dir):
+            raise RuntimeError(
+                f"Cache directory not found: {cache_dir}. "
+                f"Run run_studies.py with the same --config."
+            )
+
+        # ---------------- Event scatter from snapshot ----------------
         if cfg.STUDIES.get("event_scatter", False):
-            out_evt = os.path.join(out_proc, "event_scatter")
+            snapshot_path = snapshot_file_path(cfg, cfg_tag, proc)
+            if not os.path.exists(snapshot_path):
+                raise RuntimeError(
+                    f"Missing clustered snapshot for event scatter: {snapshot_path}\n"
+                    f"Run run_clustering.py first."
+                )
+
+            out_evt = os.path.join(plots_root, "event_scatter")
             ensure_dir(out_evt)
 
             escfg = getattr(cfg, "EVENT_SCATTER", {})
@@ -240,23 +231,27 @@ def run(cfg, cfg_tag: str):
             marker_size_min = float(escfg.get("marker_size_min", 6.0))
             marker_size_max = float(escfg.get("marker_size_max", 80.0))
 
-            evt_branches = event_scatter_branch_list(cfg, enabled_inputs)
-            evt_data = load_arrays(pinfo["path"], cfg.TREE_NAME, evt_branches, library="ak")
-            n_total_evt = len(evt_data[cfg.BRANCHES["cands"][enabled_inputs[0]]["pt"]])
+            evt_branches = []
+            for inp in enabled_inps:
+                evt_branches.extend([
+                    snapshot_branch_name_cand(inp, "pt"),
+                    snapshot_branch_name_cand(inp, "eta"),
+                    snapshot_branch_name_cand(inp, "phi"),
+                ])
+
+            evt_data = load_arrays(snapshot_path, snapshot_tree_name(cfg), sorted(set(evt_branches)), library="ak")
+            n_total_evt = len(evt_data[snapshot_branch_name_cand(enabled_inps[0], "pt")])
             n_plot = min(n_events, n_total_evt)
 
-            for inp in enabled_inputs:
+            for inp in enabled_inps:
                 out_inp = os.path.join(out_evt, sanitize(inp))
                 ensure_dir(out_inp)
 
-                cdef = cfg.BRANCHES["cands"][inp]
-
                 for ievt in range(n_plot):
-                    pt = np.asarray(evt_data[cdef["pt"]][ievt], dtype=float)
-                    eta = np.asarray(evt_data[cdef["eta"]][ievt], dtype=float)
-                    phi = wrap_phi_np(np.asarray(evt_data[cdef["phi"]][ievt], dtype=float))
+                    pt = np.asarray(evt_data[snapshot_branch_name_cand(inp, "pt")][ievt], dtype=float)
+                    eta = np.asarray(evt_data[snapshot_branch_name_cand(inp, "eta")][ievt], dtype=float)
+                    phi = wrap_phi_np(np.asarray(evt_data[snapshot_branch_name_cand(inp, "phi")][ievt], dtype=float))
 
-                    # title = f"{plabel}\n{inp} candidates — event {ievt}"
                     title = f"{plabel}\n{inp} candidates"
 
                     plot_event_eta_phi_scatter(
@@ -275,19 +270,20 @@ def run(cfg, cfg_tag: str):
                         marker_size_max=marker_size_max,
                     )
 
+        # ---------------- Common denominator ----------------
         denom = load_denoms(cache_dir)
         gen_pt_all = denom["gen_pt"].astype(np.float32)
         gen_eta_all = denom["gen_eta"].astype(np.float32)
         dz_cat_all = denom["dz_cat"].astype(np.int32)
 
         for zcat_name, zcat_mask_fn in zcat_defs.items():
-            out_z = os.path.join(out_proc, sanitize(zcat_name))
+            out_z = os.path.join(plots_root, sanitize(zcat_name))
             ensure_dir(out_z)
 
             zmask = zcat_mask_fn(dz_cat_all)
 
             for region_name, region_fn in region_defs.items():
-                out_reg = os.path.join(out_z, region_name)
+                out_reg = os.path.join(out_z, sanitize(region_name))
                 ensure_dir(out_reg)
 
                 rmask = region_fn(gen_eta_all)
@@ -307,13 +303,14 @@ def run(cfg, cfg_tag: str):
                     pt_bins_eff = cfg.PT_BINS["efficiency"]
                     pt_cent = 0.5 * (pt_bins_eff[:-1] + pt_bins_eff[1:])
                     total = np.histogram(gen_pt_denom, bins=pt_bins_eff)[0].astype(float)
-                    # total_norm = total / np.sum(total)
 
+                    out_eff = os.path.join(out_reg, "efficiency")
+                    ensure_dir(out_eff)
 
-                    eff_curves = {}
-                    keys = []
+                    for inp in enabled_inps:
+                        eff_curves = {}
+                        keys = []
 
-                    for inp in enabled_inputs:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
 
@@ -330,37 +327,40 @@ def run(cfg, cfg_tag: str):
                             eff_curves[key] = (pt_cent, eff, err)
                             keys.append(key)
 
-                    markers, colors, mfc, labs = [], [], [], []
-                    for i, k in enumerate(keys):
-                        inp = k.split("·")[0].strip()
-                        alg = k.split("·")[1].strip()
-                        mk, col, face, lab = resolve_eff_style(cfg, inp, alg, k, i)
-                        markers.append(mk)
-                        colors.append(col)
-                        mfc.append(face)
-                        labs.append(lab)
+                        if len(keys) == 0:
+                            continue
 
-                    plot_efficiencies_single_region(
-                        {k: eff_curves[k] for k in keys},
-                        pt_bins_eff,
-                        region_label,
-                        os.path.join(out_reg, "efficiency.png"),
-                        llabel=cfg.PLOT_LABELS["llabel"],
-                        rlabel=cfg.PLOT_LABELS["rlabel"],
-                        markers=markers,
-                        mfc=mfc,
-                        colors=colors,
-                        labs=labs,
-                        extra_text=extra_text,
-                        genjet_counts=total,
-                    )
+                        markers, colors, mfc, labs = [], [], [], []
+                        for i, k in enumerate(keys):
+                            alg = k.split("·")[1].strip()
+                            mk, col, face, lab = resolve_eff_style(cfg, inp, alg, k, i)
+                            markers.append(mk)
+                            colors.append(col)
+                            mfc.append(face)
+                            labs.append(lab)
+
+                        plot_efficiencies_single_region(
+                            {k: eff_curves[k] for k in keys},
+                            pt_bins_eff,
+                            region_label,
+                            os.path.join(out_eff, f"efficiency__{sanitize(inp)}.png"),
+                            llabel=cfg.PLOT_LABELS["llabel"],
+                            rlabel=cfg.PLOT_LABELS["rlabel"],
+                            markers=markers,
+                            mfc=mfc,
+                            colors=colors,
+                            labs=labs,
+                            extra_text=f"{extra_text}\n{inp}",
+                            genjet_counts=total,
+                        )
+
                 # ---------------- Ridgelines ----------------
                 if cfg.STUDIES.get("response_ridgeline", False):
                     pt_bins_r = cfg.PT_BINS["ridgeline"]
                     out_ridge = os.path.join(out_reg, "ridgeline")
                     ensure_dir(out_ridge)
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
 
@@ -414,7 +414,7 @@ def run(cfg, cfg_tag: str):
                     out_vio = os.path.join(out_reg, "violin")
                     ensure_dir(out_vio)
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
 
@@ -444,15 +444,17 @@ def run(cfg, cfg_tag: str):
                                 ylim=(0.5, 3.0)
                             )
 
-
                 # -- Purity / Fake vs pT^RECO
                 if cfg.STUDIES.get("purity_vs_ptreco", False) or cfg.STUDIES.get("fake_rate_vs_ptreco", False):
                     out_p = os.path.join(out_reg, "purity_fake")
                     ensure_dir(out_p)
-                    pt_bins_p = np.asarray(cfg.PT_BINS.get("purity", np.array([0,10,15,20,25,30,40,60,80,100,150,200,300])), dtype=float)
+                    pt_bins_p = np.asarray(
+                        cfg.PT_BINS.get("purity", np.array([0, 10, 15, 20, 25, 30, 40, 60, 80, 100, 150, 200, 300])),
+                        dtype=float
+                    )
                     pt_cent = 0.5 * (pt_bins_p[:-1] + pt_bins_p[1:])
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             recm = load_recomatch(cache_dir, inp, algo)
 
@@ -498,10 +500,10 @@ def run(cfg, cfg_tag: str):
                     out_evt = os.path.join(out_reg, "event_level")
                     ensure_dir(out_evt)
 
-                    jet_thresholds = np.asarray(cfg.PT_BINS.get("jet_thresholds", np.array([20,30,40,50], dtype=float)))
-                    ht_thresholds  = np.asarray(cfg.PT_BINS.get("ht_thresholds",  np.array([20,30,40,50], dtype=float)))
+                    jet_thresholds = np.asarray(cfg.PT_BINS.get("jet_thresholds", np.array([20, 30, 40, 50], dtype=float)))
+                    ht_thresholds = np.asarray(cfg.PT_BINS.get("ht_thresholds", np.array([20, 30, 40, 50], dtype=float)))
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             em = load_event_metrics(cache_dir, inp, algo)
                             m_z_evt = zcat_mask_fn(em["dz_cat"].astype(np.int32))
@@ -552,17 +554,14 @@ def run(cfg, cfg_tag: str):
                                         rlabel=cfg.PLOT_LABELS["rlabel"],
                                     )
 
-                # -- Response quantiles vs pT^GEN
+                # -- Response quantiles
                 if cfg.STUDIES.get("response_quantiles", False):
                     out_q = os.path.join(out_reg, "response_quantiles")
                     ensure_dir(out_q)
 
                     pt_bins_s = np.asarray(cfg.PT_BINS.get("summary_gen", cfg.PT_BINS["efficiency"]), dtype=float)
 
-                    # ---------------------------------------------------------
-                    # Per-input single plots (existing behavior)
-                    # ---------------------------------------------------------
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
 
@@ -571,7 +570,7 @@ def run(cfg, cfg_tag: str):
                             m = m_z & m_r
 
                             gen_pt = rec["gen_pt"].astype(np.float32)[m]
-                            resp   = rec["resp"].astype(np.float32)[m]
+                            resp = rec["resp"].astype(np.float32)[m]
 
                             pt_cent, (q16, q50, q84) = _bin_quantiles(gen_pt, resp, pt_bins_s, q=(16, 50, 84))
 
@@ -586,10 +585,7 @@ def run(cfg, cfg_tag: str):
                                 ylim=(0.0, 1.4)
                             )
 
-                    # ---------------------------------------------------------
-                    # overlay all input algorithms
-                    # ---------------------------------------------------------
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         curves = []
 
                         for algo in enabled_algos:
@@ -600,10 +596,9 @@ def run(cfg, cfg_tag: str):
                             m = m_z & m_r
 
                             gen_pt = rec["gen_pt"].astype(np.float32)[m]
-                            resp   = rec["resp"].astype(np.float32)[m]
+                            resp = rec["resp"].astype(np.float32)[m]
 
                             pt_cent, (q16, q50, q84) = _bin_quantiles(gen_pt, resp, pt_bins_s, q=(16, 50, 84))
-
                             algo_label = cfg.ALGORITHMS.get(algo, {}).get("label", algo)
 
                             curves.append({
@@ -622,17 +617,17 @@ def run(cfg, cfg_tag: str):
                             title=title,
                             llabel=cfg.PLOT_LABELS["llabel"],
                             rlabel=cfg.PLOT_LABELS["rlabel"],
-                            ylim=(0.5, 2)
+                            ylim=(0.0, 1.5)
                         )
 
-                # -- dR quantiles vs pT^GEN
+                # -- dR quantiles
                 if cfg.STUDIES.get("dr_quantiles", False):
                     out_dr = os.path.join(out_reg, "dr_quantiles")
                     ensure_dir(out_dr)
 
                     pt_bins_s = np.asarray(cfg.PT_BINS.get("summary_gen", cfg.PT_BINS["efficiency"]), dtype=float)
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
 
@@ -641,7 +636,7 @@ def run(cfg, cfg_tag: str):
                             m = m_z & m_r
 
                             gen_pt = rec["gen_pt"].astype(np.float32)[m]
-                            dr     = rec["dr"].astype(np.float32)[m]
+                            dr = rec["dr"].astype(np.float32)[m]
 
                             pt_cent, (q16, q50, q84) = _bin_quantiles(gen_pt, dr, pt_bins_s, q=(16, 50, 84))
 
@@ -656,7 +651,7 @@ def run(cfg, cfg_tag: str):
                                 ylim=(0.0, float(cfg.MATCHING.get("dR_match", 0.3)) * 1.2)
                             )
 
-                # -- Turn-ons: P(pT^RECO > thr | GEN jet in bin)
+                # -- Turn-ons
                 if cfg.STUDIES.get("turnons", False):
                     out_t = os.path.join(out_reg, "turnons")
                     ensure_dir(out_t)
@@ -667,7 +662,7 @@ def run(cfg, cfg_tag: str):
 
                     total = np.histogram(gen_pt_denom, bins=pt_bins_s)[0].astype(float)
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
                             m_z = zcat_mask_fn(rec["dz_cat"].astype(np.int32))
@@ -693,20 +688,18 @@ def run(cfg, cfg_tag: str):
                                 rlabel=cfg.PLOT_LABELS["rlabel"],
                             )
 
-
+                # -- F1
                 if cfg.STUDIES.get("f1", False):
                     out_f1 = os.path.join(out_reg, "f1")
                     ensure_dir(out_f1)
 
-                    # Truth jets in this slice: GEN jets with pT_GEN >= T
                     truth_counts = np.array([np.sum(gen_pt_denom >= float(T)) for T in f1_thresholds], dtype=float)
 
-                    for inp in enabled_inputs:
+                    for inp in enabled_inps:
                         for algo in enabled_algos:
                             rec = load_matches(cache_dir, inp, algo)
                             rm = load_recomatch(cache_dir, inp, algo)
 
-                            # Slice match cache by dz + region (region defined on GEN eta)
                             m_z = zcat_mask_fn(rec["dz_cat"].astype(np.int32))
                             m_r = region_fn(rec["gen_eta"].astype(np.float32))
                             m_mask = m_z & m_r
@@ -714,8 +707,6 @@ def run(cfg, cfg_tag: str):
                             m_gen_pt = rec["gen_pt"].astype(np.float32)[m_mask]
                             m_reco_pt = rec["reco_pt"].astype(np.float32)[m_mask]
 
-                            # Slice recomatch by dz and by GEN eta of matched gen jet.
-                            # Note: unmatched reco entries have dummy gen_eta/gen_pt; they are excluded by region_fn(gen_eta)
                             rm_z = zcat_mask_fn(rm["dz_cat"].astype(np.int32))
                             rm_r = region_fn(rm["gen_eta"].astype(np.float32))
                             rm_mask = rm_z & rm_r
@@ -723,16 +714,11 @@ def run(cfg, cfg_tag: str):
                             reco_pt = rm["reco_pt"].astype(np.float32)[rm_mask]
                             reco_matched_genpt = rm["gen_pt"].astype(np.float32)[rm_mask]
 
-                            # TP(T): matched pairs with both gen_pt>=T and reco_pt>=T
                             TP = np.array(
                                 [np.sum((m_gen_pt >= float(T)) & (m_reco_pt >= float(T))) for T in f1_thresholds],
                                 dtype=float
                             )
-
-                            # Predicted jets above T in this slice (as defined by rm_mask)
                             Npred = np.array([np.sum(reco_pt >= float(T)) for T in f1_thresholds], dtype=float)
-
-                            # Of those predicted jets above T, count those matched to a truth jet above T
                             TPpred = np.array(
                                 [np.sum((reco_pt >= float(T)) & (reco_matched_genpt >= float(T))) for T in f1_thresholds],
                                 dtype=float
@@ -763,36 +749,27 @@ def run(cfg, cfg_tag: str):
                                 title=title
                             )
 
+                # -- AK compatibility
                 if cfg.STUDIES.get("ak_compat", False):
-                    # ---- config
-                    pt_bins = np.asarray(cfg.AK_COMPAT["pt_bins"], dtype=float)   # interpreted as GEN pT bins here
+                    pt_bins = np.asarray(cfg.AK_COMPAT["pt_bins"], dtype=float)
                     ref_alg = cfg.AK_COMPAT["ref_algo"]
 
                     out_ak = os.path.join(out_reg, "akcompat")
                     ensure_dir(out_ak)
 
-                    # use the same bins for the histogram and for the debug check
                     hist_bins = np.linspace(0, 1, 21)
-
-                    # list of non-reference algos, in config order
                     nonref_algos = [algo for algo in enabled_algos if algo != ref_alg]
 
-                    # ---- (1) IoU overlays per GEN pT bin (weighted + unweighted)
                     metrics_to_plot = [
                         ("iou", "IoU (pT-weighted)"),
                         ("iou_unw", "IoU (unweighted)"),
                     ]
-
-                    # ---- (2) Ratio distributions per GEN pT bin
                     ratio_metrics = [
-                        ("ratio_n",  r"$N_\mathrm{const}(\mathrm{AK})/N_\mathrm{const}(\mathrm{Alt})$"),
+                        ("ratio_n", r"$N_\mathrm{const}(\mathrm{AK})/N_\mathrm{const}(\mathrm{Alt})$"),
                         ("ratio_pt", r"$\sum p_T^\mathrm{const}(\mathrm{AK})/\sum p_T^\mathrm{const}(\mathrm{Alt})$"),
                     ]
 
-                    for inp in enabled_inputs:
-                        # -------------------------
-                        # A) IoU distributions in GEN pT bins
-                        # -------------------------
+                    for inp in enabled_inps:
                         for metric_key, metric_label in metrics_to_plot:
                             values_by_ptbin_by_algo = []
 
@@ -802,12 +779,9 @@ def run(cfg, cfg_tag: str):
 
                                 for algo in nonref_algos:
                                     rec = load_akcompat_gen(cache_dir, inp, algo)
-                                    if rec is None:
-                                        continue
-                                    if metric_key not in rec.files:
+                                    if rec is None or metric_key not in rec.files:
                                         continue
 
-                                    # dz + region cut (region on GEN eta in this GEN-anchored cache)
                                     m_z = zcat_mask_fn(rec["dz_cat"].astype(np.int32))
                                     m_r = region_fn(rec["gen_eta"].astype(np.float32))
                                     m = m_z & m_r
@@ -817,7 +791,6 @@ def run(cfg, cfg_tag: str):
 
                                     vals = rec[metric_key][sel].astype(np.float32)
                                     vals = vals[np.isfinite(vals)]
-
                                     values_by_algo[algo] = vals
 
                                 values_by_ptbin_by_algo.append(values_by_algo)
@@ -831,22 +804,17 @@ def run(cfg, cfg_tag: str):
                             plot_akcompat_overlay_hist_subplots(
                                 values_by_ptbin_by_algo=values_by_ptbin_by_algo,
                                 pt_bins=pt_bins,
-                                outputfile=os.path.join(
-                                    out_ak,
-                                    f"akcompat_gen_subplots__{sanitize(inp)}__{sanitize(metric_key)}.png"
-                                ),
+                                outputfile=os.path.join(out_ak, f"akcompat_gen_subplots__{sanitize(inp)}__{sanitize(metric_key)}.png"),
                                 xlabel=metric_label,
                                 title=title_reco_reco(plabel, inp, ref_alg) + "\n(GEN-matched to both)",
                                 llabel=cfg.PLOT_LABELS["llabel"],
                                 rlabel=cfg.PLOT_LABELS["rlabel"],
                                 bins=hist_bins,
-                                xlim=(0., 1.0),
+                                xlim=(0.0, 1.0),
                                 yscale="log",
                                 algo_labels=algo_label_map,
-                                # algo_order=algo_order,
                             )
 
-                            # title should depend on weighted vs unweighted
                             if metric_key == "iou":
                                 table_title = title_reco_reco(plabel, inp, ref_alg) + "\n% with weighted IoU ≥ 0.95 to AK"
                             else:
@@ -855,10 +823,7 @@ def run(cfg, cfg_tag: str):
                             plot_akcompat_exact_match_table(
                                 values_by_ptbin_by_algo=values_by_ptbin_by_algo,
                                 pt_bins=pt_bins,
-                                outputfile=os.path.join(
-                                    out_ak,
-                                    f"akcompat_exact1p0_table__{sanitize(inp)}__{sanitize(metric_key)}.png"
-                                ),
+                                outputfile=os.path.join(out_ak, f"akcompat_exact1p0_table__{sanitize(inp)}__{sanitize(metric_key)}.png"),
                                 title=table_title,
                                 llabel=cfg.PLOT_LABELS["llabel"],
                                 rlabel=cfg.PLOT_LABELS["rlabel"],
@@ -867,9 +832,6 @@ def run(cfg, cfg_tag: str):
                                 atol=0.05,
                             )
 
-                        # -------------------------
-                        # B) Ratio distributions in GEN pT bins
-                        # -------------------------
                         for metric_key, metric_label in ratio_metrics:
                             values_by_ptbin_by_algo = []
 
@@ -882,9 +844,7 @@ def run(cfg, cfg_tag: str):
                                         continue
 
                                     rec = load_akcompat_gen(cache_dir, inp, algo)
-                                    if rec is None:
-                                        continue
-                                    if metric_key not in rec.files:
+                                    if rec is None or metric_key not in rec.files:
                                         continue
 
                                     m_z = zcat_mask_fn(rec["dz_cat"].astype(np.int32))
@@ -896,21 +856,15 @@ def run(cfg, cfg_tag: str):
 
                                     vals = rec[metric_key][sel].astype(np.float32)
                                     vals = vals[np.isfinite(vals)]
-                                    # keep it sane; ratios can have long tails if alt jet is tiny
                                     vals = vals[(vals > 0) & (vals < 10)]
                                     values_by_algo[algo] = vals
 
                                 values_by_ptbin_by_algo.append(values_by_algo)
 
-                            # Choose x-range and bins that work for "AK/Alt"
-                            # (centered at 1, with tails visible)
                             plot_akcompat_overlay_hist_subplots(
                                 values_by_ptbin_by_algo=values_by_ptbin_by_algo,
                                 pt_bins=pt_bins,
-                                outputfile=os.path.join(
-                                    out_ak,
-                                    f"akcompat_gen_subplots__{sanitize(inp)}__{sanitize(metric_key)}.png"
-                                ),
+                                outputfile=os.path.join(out_ak, f"akcompat_gen_subplots__{sanitize(inp)}__{sanitize(metric_key)}.png"),
                                 xlabel=metric_label,
                                 title=title_reco_reco(plabel, inp, ref_alg) + "\n(GEN-matched to both)",
                                 llabel=cfg.PLOT_LABELS["llabel"],
@@ -921,10 +875,10 @@ def run(cfg, cfg_tag: str):
 
         # ---------------- Agreement ----------------
         if cfg.STUDIES.get("ak4_agreement", False):
-            out_ag = os.path.join(out_proc, "agreement_with_AK4")
+            out_ag = os.path.join(plots_root, "agreement_with_AK4")
             ensure_dir(out_ag)
 
-            for inp in enabled_inputs:
+            for inp in enabled_inps:
                 for algo in enabled_algos:
                     f = os.path.join(cache_dir, f"agreement__{sanitize(inp)}__{sanitize(algo)}.npz")
                     if not os.path.exists(f):
@@ -945,6 +899,9 @@ def run(cfg, cfg_tag: str):
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg = load_cfg_from_path(args.config)
-    tag = config_tag_from_path(args.config)
+
+    cfg_path = resolve_config_path(args.config)
+    cfg = load_cfg_from_path(cfg_path)
+    tag = config_tag_from_path(cfg_path)
+
     run(cfg, tag)

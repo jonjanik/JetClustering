@@ -1,384 +1,193 @@
-# run_processing.py
+# run_studies.py
 import os
 import argparse
-import importlib.util
 import numpy as np
 import awkward as ak
-import inspect
 
+from src.config_utils import (
+    load_cfg_from_path,
+    config_tag_from_path,
+    enabled_inputs,
+    enabled_algos_with_cfg,
+    snapshot_file_path,
+    snapshot_tree_name,
+    snapshot_branch_list,
+    snapshot_branch_name_cand,
+    snapshot_branch_name_algo,
+    cache_dir_path,
+    sanitize,
+    maybe_tqdm,
+    resolve_config_path,
+)
 from src.utils import (
-    load_arrays, ensure_dir, match_gen_to_reco, match_reco_to_gen,
-    match_reco_to_reco, pt_weighted_constituent_overlap,
-    unweighted_constituent_overlap, save_columnar_npz,
-    jet_constituent_count, jet_constituent_sumpt, safe_ratio,
+    ensure_dir,
+    load_arrays,
+    compute_event_dz_cat_from_snapshot,
+    match_gen_to_reco,
+    match_reco_to_gen,
+    match_reco_to_reco,
+    pt_weighted_constituent_overlap,
+    unweighted_constituent_overlap,
+    save_columnar_npz,
+    save_matches_npz,
+    jet_constituent_count,
+    jet_constituent_sumpt,
+    safe_ratio,
+    remap_assign_after_jet_pt_cut,
+    wrap_phi_np,
 )
-
-from src.clustering_algorithms import (
-    ALGO_REGISTRY, wrap_phi
-)
-
-try:
-    from tqdm import tqdm
-except Exception:
-    tqdm = None
-
-
-# -----------------------------
-# Config loading
-# -----------------------------
-def load_cfg_from_path(cfg_path: str):
-    cfg_path = os.path.abspath(cfg_path)
-    if not os.path.exists(cfg_path):
-        raise FileNotFoundError(f"Config not found: {cfg_path}")
-    spec = importlib.util.spec_from_file_location("user_cfg", cfg_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load config: {cfg_path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def config_tag_from_path(cfg_path: str) -> str:
-    base = os.path.basename(cfg_path)
-    if base.endswith(".py"):
-        base = base[:-3]
-    return base
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Run processing and write caches for plotting.")
-    ap.add_argument("--config", "-c", default="config.py",
-                    help="Path to config file, e.g. configs/example_config.py (default: config.py)")
+    ap = argparse.ArgumentParser(
+        description="Read clustered snapshot ROOT and derive study caches for plotting."
+    )
+    ap.add_argument(
+        "--config", "-c", default="config.py",
+        help="Config file (auto-resolves from configs/ if not found locally)"
+    )
     return ap.parse_args()
 
 
-def maybe_tqdm(cfg, it, total=None, desc=None):
-    if cfg.RUNTIME.get("use_tqdm", True) and (tqdm is not None):
-        return tqdm(it, total=total, desc=desc)
-    return it
+def _load_snapshot_cands(data, inp, ievt):
+    out = {
+        "pt": np.asarray(ak.to_numpy(data[snapshot_branch_name_cand(inp, 'pt')][ievt]), dtype=float),
+        "eta": np.asarray(ak.to_numpy(data[snapshot_branch_name_cand(inp, 'eta')][ievt]), dtype=float),
+        "phi": wrap_phi_np(np.asarray(ak.to_numpy(data[snapshot_branch_name_cand(inp, 'phi')][ievt]), dtype=float)),
+    }
+
+    mass_br = snapshot_branch_name_cand(inp, "mass")
+    charge_br = snapshot_branch_name_cand(inp, "charge")
+    pid_br = snapshot_branch_name_cand(inp, "abs_pdgid")
+
+    if mass_br in data.fields:
+        out["mass"] = np.asarray(ak.to_numpy(data[mass_br][ievt]), dtype=float)
+    if charge_br in data.fields:
+        out["charge"] = np.asarray(ak.to_numpy(data[charge_br][ievt]))
+    if pid_br in data.fields:
+        out["abs_pdgid"] = np.asarray(ak.to_numpy(data[pid_br][ievt]), dtype=int)
+
+    return out
 
 
-def sanitize(s: str) -> str:
-    return (
-        s.replace(" ", "_")
-         .replace("/", "_")
-         .replace("(", "")
-         .replace(")", "")
-         .replace(",", "")
-         .replace("=", "")
-         .replace("|", "")
-         .replace("≥", "ge")
-         .replace("<", "lt")
-         .replace(".", "p")
-    )
+def _load_snapshot_algo_raw(data, inp, algo, ievt):
+    rpt = np.asarray(ak.to_numpy(data[snapshot_branch_name_algo(inp, algo, "jet_pt")][ievt]), dtype=float)
+    reta = np.asarray(ak.to_numpy(data[snapshot_branch_name_algo(inp, algo, "jet_eta")][ievt]), dtype=float)
+    rphi = wrap_phi_np(np.asarray(ak.to_numpy(data[snapshot_branch_name_algo(inp, algo, "jet_phi")][ievt]), dtype=float))
+    assign = np.asarray(ak.to_numpy(data[snapshot_branch_name_algo(inp, algo, "cand_jetIdx")][ievt]), dtype=int)
+    seedmask = np.asarray(ak.to_numpy(data[snapshot_branch_name_algo(inp, algo, "cand_isSeed")][ievt]), dtype=bool)
+    return rpt, reta, rphi, assign, seedmask
 
 
-def select_event_indices(cfg, n_total: int) -> np.ndarray:
-    max_events = cfg.RUNTIME.get("max_events", None)
-    sampling = cfg.RUNTIME.get("event_sampling", "head")
-    stride = int(cfg.RUNTIME.get("stride", 1))
-
-    if (max_events is None) or (max_events <= 0) or (max_events >= n_total):
-        return np.arange(n_total, dtype=int)
-
-    if sampling == "stride":
-        idx = np.arange(0, n_total, stride, dtype=int)
-        return idx[:max_events]
-
-    return np.arange(int(max_events), dtype=int)
-
-
-def branch_list(cfg):
-    bl = []
-    for _, cmap in cfg.BRANCHES["cands"].items():
-        for _, br in cmap.items():
-            if br:
-                bl.append(br)
-    for _, br in cfg.BRANCHES["genjets"].items():
-        bl.append(br)
-    vtx = cfg.BRANCHES.get("vtx", {})
-    for k in ("z_gen", "z_reco", "reco_sumpt", "n_reco"):
-        if vtx.get(k):
-            bl.append(vtx[k])
-    return sorted(set(bl))
-
-
-def scalar_item(x, default=None):
-    if x is None:
-        return default
-    if isinstance(x, ak.highlevel.Array):
-        x = ak.to_numpy(x)
-    if isinstance(x, np.generic):
-        return x.item()
-    if isinstance(x, np.ndarray):
-        if x.ndim == 0:
-            return x.item()
-        if x.size == 0:
-            return default
-        return x.reshape(-1)[0].item()
-    if isinstance(x, (list, tuple)):
-        if len(x) == 0:
-            return default
-        return scalar_item(x[0], default=default)
-    return x
-
-
-def call_algo_with_supported_kwargs(fn, eta, phi, pt, extra_kwargs, algo_kwargs):
-    """
-    Call clustering function with only the keyword arguments it actually accepts.
-
-    - fn: algorithm function
-    - eta, phi, pt: positional candidate arrays
-    - extra_kwargs: optional per-event extras like mass/charge/abs_pdgid
-    - algo_kwargs: static algorithm params from config
-    """
-    sig = inspect.signature(fn)
-    params = sig.parameters
-
-    accepts_var_kw = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD
-        for p in params.values()
-    )
-
-    merged = {}
-    merged.update(extra_kwargs)
-    merged.update(algo_kwargs)
-
-    if accepts_var_kw:
-        return fn(eta, phi, pt, **merged)
-
-    allowed = {k: v for k, v in merged.items() if k in params}
-    return fn(eta, phi, pt, **allowed)
-
-
-def compute_event_dz_cat(cfg, data, ievt: int) -> int:
-    if not cfg.Z_SPLIT.get("enabled", False):
-        return 0
-
-    vtx = cfg.BRANCHES.get("vtx", {})
-    zgen_br = vtx.get("z_gen")
-    zreco_br = vtx.get("z_reco")
-    sumpt_br = vtx.get("reco_sumpt")
-    nreco_br = vtx.get("n_reco")
-
-    if any(x is None for x in (zgen_br, zreco_br, sumpt_br, nreco_br)):
-        return -1
-
-    nreco = scalar_item(data[nreco_br][ievt], default=0)
-    if int(nreco) <= 0:
-        return -1
-
-    sp = ak.to_numpy(data[sumpt_br][ievt])
-    zz = ak.to_numpy(data[zreco_br][ievt])
-    if sp.size == 0 or zz.size == 0:
-        return -1
-
-    pv_idx = int(np.argmax(sp))
-    zreco = float(zz[pv_idx])
-
-    zgen = scalar_item(data[zgen_br][ievt], default=None)
-    if zgen is None:
-        return -1
-
-    dz = abs(float(zgen) - zreco)
-    thr = float(cfg.Z_SPLIT.get("dz_cm", 1.0))
-    return 0 if dz < thr else 1
-
-
-def save_matches_npz(outpath, records):
-    keys = [
-        "event", "gen_idx", "reco_idx",
-        "gen_pt", "gen_eta", "gen_phi",
-        "reco_pt", "reco_eta", "reco_phi",
-        "dr", "resp", "dpt_rel",
-        "dz_cat",
-    ]
-    if len(records) == 0:
-        np.savez_compressed(
-            outpath,
-            **{k: np.array([], dtype=(np.int32 if k in ("event", "gen_idx", "reco_idx", "dz_cat") else np.float32))
-               for k in keys}
-        )
-        return
-
-    cols = {k: [] for k in keys}
-    for r in records:
-        for k in keys:
-            cols[k].append(r[k])
-
-    out = {}
-    for k, v in cols.items():
-        if k in ("event", "gen_idx", "reco_idx", "dz_cat"):
-            out[k] = np.asarray(v, dtype=np.int32)
-        else:
-            out[k] = np.asarray(v, dtype=np.float32)
-
-    np.savez_compressed(outpath, **out)
-
-def remap_assign_after_jet_pt_cut(assign, keep_mask):
-    """
-    Remap per-constituent jet assignment indices after removing jets.
-
-    assign: int array of length Ncands, values in [-1, 0..Njets-1] (OLD jet indices)
-    keep_mask: bool array of length Njets (OLD jet list), True for jets we keep
-
-    Returns:
-      new_assign: int array length Ncands, values in [-1, 0..Nkept-1]
-      old_to_new: int array length Njets, mapping old jet idx -> new jet idx (or -1)
-    """
-    assign = np.asarray(assign, dtype=int)
-    keep_mask = np.asarray(keep_mask, dtype=bool)
-
-    n_old = int(keep_mask.size)
-    old_to_new = np.full(n_old, -1, dtype=int)
-    kept_old = np.where(keep_mask)[0]
-    for new_i, old_i in enumerate(kept_old):
-        old_to_new[int(old_i)] = int(new_i)
-
-    new_assign = np.full_like(assign, -1)
-    ok = (assign >= 0) & (assign < n_old)
-    if np.any(ok):
-        mapped = old_to_new[assign[ok]]
-        new_assign[ok] = mapped  # mapped is -1 for removed jets
-    return new_assign, old_to_new
-
-
-# -----------------------------
-# Main
-# -----------------------------
 def run(cfg, cfg_tag: str):
-    out_root = os.path.join(getattr(cfg, "OUTDIR", "outputs"), cfg_tag)
-    ensure_dir(out_root)
+    inputs = enabled_inputs(cfg)
+    algos = enabled_algos_with_cfg(cfg)
 
-    enabled_inputs = [k for k, v in cfg.INPUTS.items() if v]
-    enabled_algos = [(name, a) for name, a in cfg.ALGORITHMS.items() if a.get("enabled", False)]
-
-    # --- AK-compat config
     do_akcompat = cfg.STUDIES.get("ak_compat", False)
     ak_ref_algo = cfg.AK_COMPAT.get("ref_algo", "AntiKt")
     ak_dR = float(cfg.AK_COMPAT.get("dR_match", 0.2))
 
-    for proc, pinfo in cfg.PROCESSES.items():
-        path = pinfo["path"]
-        print(f"\n=== PROCESS: {proc} | file: {path} | config: {cfg_tag} ===")
+    jet_thresholds = np.asarray(
+        cfg.PT_BINS.get("jet_thresholds", np.array([20, 30, 40, 50], dtype=float)),
+        dtype=float
+    )
+    ht_thresholds = np.asarray(
+        cfg.PT_BINS.get("ht_thresholds", np.array([20, 30, 40, 50], dtype=float)),
+        dtype=float
+    )
 
-        data = load_arrays(path, cfg.TREE_NAME, branch_list(cfg), library="ak")
-        n_total = len(data[cfg.BRANCHES["genjets"]["pt"]])
-        ev_idx = select_event_indices(cfg, n_total)
-        print(f"Loaded {n_total} events (processing {len(ev_idx)})")
-
-        out_proc = os.path.join(out_root, proc)
-        out_cache = os.path.join(out_proc, "cache")
+    for proc, _pinfo in cfg.PROCESSES.items():
+        in_snapshot = snapshot_file_path(cfg, cfg_tag, proc)
+        out_cache = cache_dir_path(cfg, cfg_tag, proc)
         ensure_dir(out_cache)
 
-        gen_pt_all  = data[cfg.BRANCHES["genjets"]["pt"]]
-        gen_eta_all = data[cfg.BRANCHES["genjets"]["eta"]]
-        gen_phi_all = data[cfg.BRANCHES["genjets"]["phi"]]
+        if not os.path.exists(in_snapshot):
+            raise RuntimeError(
+                f"Missing clustered snapshot: {in_snapshot}\n"
+                f"Run run_clustering.py first with the same --config."
+            )
 
-        # containers-
+        print(f"\n=== STUDIES: {proc} | snapshot: {in_snapshot} | config: {cfg_tag} ===")
+
+        data = load_arrays(in_snapshot, snapshot_tree_name(cfg), snapshot_branch_list(cfg), library="ak")
+        n_events = len(data["event_idx"])
+        ev_idx = np.arange(n_events, dtype=int)
+
+        print(f"Loaded {n_events} clustered events from snapshot")
+
+        # -----------------------------
+        # Denominators / containers
+        # -----------------------------
         denom_gen_pt = []
         denom_gen_eta = []
         denom_dz_cat = []
 
         reco_denom = {
             (inp, aname): {"event": [], "reco_idx": [], "reco_pt": [], "reco_eta": [], "reco_phi": [], "dz_cat": []}
-            for inp in enabled_inputs for aname, _ in enabled_algos
+            for inp in inputs for aname, _ in algos
         }
 
         evt_metrics = {
-            (inp, aname): {"event": [], "dz_cat": [],
-                           "njet_ge_T": {}, "ht_ge_T": {},
-                           "nseeds": []}
-            for inp in enabled_inputs for aname, _ in enabled_algos
+            (inp, aname): {"event": [], "dz_cat": [], "njet_ge_T": {}, "ht_ge_T": {}, "nseeds": []}
+            for inp in inputs for aname, _ in algos
         }
-
-        jet_thresholds = np.asarray(cfg.PT_BINS.get("jet_thresholds", np.array([20, 30, 40, 50], dtype=float)), dtype=float)
-        ht_thresholds  = np.asarray(cfg.PT_BINS.get("ht_thresholds",  np.array([20, 30, 40, 50], dtype=float)), dtype=float)
-
         for T in jet_thresholds:
-            for key in evt_metrics.keys():
+            for key in evt_metrics:
                 evt_metrics[key]["njet_ge_T"][float(T)] = []
         for T in ht_thresholds:
-            for key in evt_metrics.keys():
+            for key in evt_metrics:
                 evt_metrics[key]["ht_ge_T"][float(T)] = []
 
-        match_records = {(inp, aname): [] for inp in enabled_inputs for aname, _ in enabled_algos}
-        reco_match_records = {(inp, aname): [] for inp in enabled_inputs for aname, _ in enabled_algos}
+        match_records = {(inp, aname): [] for inp in inputs for aname, _ in algos}
+        reco_match_records = {(inp, aname): [] for inp in inputs for aname, _ in algos}
         unmatched_counts = {
             (inp, aname): {"event": [], "dz_cat": [], "nunmatched_gen": [], "nunmatched_reco": []}
-            for inp in enabled_inputs for aname, _ in enabled_algos
+            for inp in inputs for aname, _ in algos
         }
 
-        agreement = {}
-        do_agree = cfg.STUDIES.get("ak4_agreement", False)
-        have_pf = ("PF" in enabled_inputs)
-        have_antikt = any(an == "AntiKt" for an, _ in enabled_algos)
-        if do_agree and not (have_pf and have_antikt):
-            do_agree = False
-
-        # --- AK-compat records (additive)
         akcompat_records = {
             (inp, aname): []
-            for inp in enabled_inputs
-            for aname, _ in enabled_algos
+            for inp in inputs
+            for aname, _ in algos
             if aname != ak_ref_algo
         }
-
         akcompat_gen_records = {
             (inp, aname): []
-            for inp in enabled_inputs
-            for aname, _ in enabled_algos
+            for inp in inputs
+            for aname, _ in algos
             if aname != ak_ref_algo
         }
-
         akmatch_ref_records = {
             (inp, aname): []
-            for inp in enabled_inputs
-            for aname, _ in enabled_algos
+            for inp in inputs
+            for aname, _ in algos
             if aname != ak_ref_algo
         }
         akmatch_alt_records = {
             (inp, aname): []
-            for inp in enabled_inputs
-            for aname, _ in enabled_algos
+            for inp in inputs
+            for aname, _ in algos
             if aname != ak_ref_algo
         }
-
-        algo_fns = {aname: ALGO_REGISTRY[acfg["fn"]] for aname, acfg in enabled_algos}
-        algo_params = {aname: acfg.get("params", {}) for aname, acfg in enabled_algos}
-
-        cand_arrays = {}
-        for inp in enabled_inputs:
-            cdef = cfg.BRANCHES["cands"][inp]
-            cand_arrays[inp] = {
-                "pt":  data[cdef["pt"]],
-                "eta": data[cdef["eta"]],
-                "phi": data[cdef["phi"]],
-            }
-            # OPTIONAL extras (only if provided in config)
-            if "mass" in cdef and cdef["mass"]:
-                cand_arrays[inp]["mass"] = data[cdef["mass"]]
-            if "charge" in cdef and cdef["charge"]:
-                cand_arrays[inp]["charge"] = data[cdef["charge"]]
-            # use name "pid" or "pdgId" depending on your ntuple conventions
-            if "abs_pdgid" in cdef and cdef["abs_pdgid"]:
-                cand_arrays[inp]["abs_pdgid"] = data[cdef["abs_pdgid"]]
-            elif "pdgId" in cdef and cdef["pdgId"]:
-                cand_arrays[inp]["abs_pdgid"] = data[cdef["pdgId"]]
 
         # -----------------------------
         # Event loop
         # -----------------------------
-        for ievt in maybe_tqdm(cfg, ev_idx, total=len(ev_idx), desc=f"{proc}: events"):
-            ievt = int(ievt)
-            dz_cat_evt = compute_event_dz_cat(cfg, data, ievt)
+        for isnap in maybe_tqdm(cfg, ev_idx, total=len(ev_idx), desc=f"{proc}: studies"):
+            isnap = int(isnap)
+            event_id = int(np.asarray(data["event_idx"][isnap]).reshape(-1)[0])
 
-            gen_pt  = ak.to_numpy(gen_pt_all[ievt])
-            gen_eta = ak.to_numpy(gen_eta_all[ievt])
-            gen_phi = wrap_phi(ak.to_numpy(gen_phi_all[ievt]))
+            dz_cat_evt = compute_event_dz_cat_from_snapshot(cfg, data, isnap)
+
+            gen_pt = np.asarray(ak.to_numpy(data["GenJet_pt"][isnap]), dtype=float)
+            gen_eta = np.asarray(ak.to_numpy(data["GenJet_eta"][isnap]), dtype=float)
+            gen_phi = wrap_phi_np(np.asarray(ak.to_numpy(data["GenJet_phi"][isnap]), dtype=float))
 
             gsel = (gen_pt >= float(cfg.MATCHING["pt_gen_min"]))
-            gen_pt, gen_eta, gen_phi = gen_pt[gsel], gen_eta[gsel], gen_phi[gsel]
+            gen_pt = gen_pt[gsel]
+            gen_eta = gen_eta[gsel]
+            gen_phi = gen_phi[gsel]
+
             if gen_pt.size == 0:
                 continue
 
@@ -386,72 +195,44 @@ def run(cfg, cfg_tag: str):
             denom_gen_eta.append(gen_eta.astype(np.float32))
             denom_dz_cat.append(np.full(gen_pt.shape, dz_cat_evt, dtype=np.int32))
 
-            # cluster
-            reco_by_key = {}      # (inp, aname) -> (pt, eta, phi)
-            assign_by_key = {}    # (inp, aname) -> assign
+            reco_by_key = {}
+            assign_by_key = {}
             seedmask_by_key = {}
+            cand_arrays = {}
 
-            for inp in enabled_inputs:
-                cpt  = ak.to_numpy(cand_arrays[inp]["pt"][ievt])
-                ceta = ak.to_numpy(cand_arrays[inp]["eta"][ievt])
-                cphi = wrap_phi(ak.to_numpy(cand_arrays[inp]["phi"][ievt]))
+            # -----------------------------
+            # Per input / algo reconstruction info from snapshot
+            # -----------------------------
+            for inp in inputs:
+                cand_arrays[inp] = _load_snapshot_cands(data, inp, isnap)
+                cand_pt_evt = cand_arrays[inp]["pt"]
 
-                for aname, _ in enabled_algos:
-                    cmass = ak.to_numpy(cand_arrays[inp]["mass"][ievt]) if "mass" in cand_arrays[inp] else None
-                    cchg  = ak.to_numpy(cand_arrays[inp]["charge"][ievt]) if "charge" in cand_arrays[inp] else None
-                    cpid  = ak.to_numpy(cand_arrays[inp]["abs_pdgid"][ievt]) if "abs_pdgid" in cand_arrays[inp] else None
-                    if cpid is not None:
-                        cpid = np.abs(cpid).astype(int)
-
-                    extra_kwargs = {
-                        "mass": cmass,
-                        "charge": cchg,
-                        "abs_pdgid": cpid,
-                    }
-
-                    jets, assign, seed_mask = call_algo_with_supported_kwargs(
-                        algo_fns[aname],
-                        ceta, cphi, cpt,
-                        extra_kwargs=extra_kwargs,
-                        algo_kwargs=algo_params[aname],
+                for aname, _ in algos:
+                    rpt_all, reta_all, rphi_all, assign_raw, seedmask_raw = _load_snapshot_algo_raw(
+                        data, inp, aname, isnap
                     )
-                    rpt_all, reta_all, rphi_all, _ = jets
 
-                    rpt_all = np.asarray(rpt_all, dtype=float)
-                    reta_all = np.asarray(reta_all, dtype=float)
-                    rphi_all = np.asarray(rphi_all, dtype=float)
-
-                    # apply jet pT cut on the jet list
                     rsel = (rpt_all >= float(cfg.MATCHING["pt_reco_min"]))
-
                     rpt = rpt_all[rsel]
                     reta = reta_all[rsel]
                     rphi = rphi_all[rsel]
 
-                    # remap assign old->new indices after cutting jets
-                    assign_new, _old_to_new = remap_assign_after_jet_pt_cut(assign, rsel)
+                    assign_new, _old_to_new = remap_assign_after_jet_pt_cut(assign_raw, rsel)
 
                     reco_by_key[(inp, aname)] = (rpt, reta, rphi)
                     assign_by_key[(inp, aname)] = np.asarray(assign_new, dtype=int)
+                    seedmask_by_key[(inp, aname)] = np.asarray(seedmask_raw, dtype=bool)
 
-                    seedmask_by_key[(inp, aname)] = (
-                        np.asarray(seed_mask, dtype=bool)
-                        if seed_mask is not None else np.array([], dtype=bool)
-                    )
-
-
-                    # reco denominators
                     for ir in range(len(rpt)):
-                        reco_denom[(inp, aname)]["event"].append(ievt)
+                        reco_denom[(inp, aname)]["event"].append(event_id)
                         reco_denom[(inp, aname)]["reco_idx"].append(ir)
                         reco_denom[(inp, aname)]["reco_pt"].append(float(rpt[ir]))
                         reco_denom[(inp, aname)]["reco_eta"].append(float(reta[ir]))
                         reco_denom[(inp, aname)]["reco_phi"].append(float(rphi[ir]))
                         reco_denom[(inp, aname)]["dz_cat"].append(int(dz_cat_evt))
 
-                    # event metrics
                     nseeds = int(np.sum(seedmask_by_key[(inp, aname)])) if seedmask_by_key[(inp, aname)].size else 0
-                    evt_metrics[(inp, aname)]["event"].append(ievt)
+                    evt_metrics[(inp, aname)]["event"].append(event_id)
                     evt_metrics[(inp, aname)]["dz_cat"].append(int(dz_cat_evt))
                     evt_metrics[(inp, aname)]["nseeds"].append(nseeds)
 
@@ -460,12 +241,11 @@ def run(cfg, cfg_tag: str):
                     for T in ht_thresholds:
                         evt_metrics[(inp, aname)]["ht_ge_T"][float(T)].append(float(np.sum(rpt[rpt >= float(T)])))
 
-            # ------------------------------------------------------------
-            # per-event GEN->RECO maps for (inp, aname)
-            # ------------------------------------------------------------
-            gen2reco_evt = {}  # (inp, aname) -> dict(gen_idx -> reco_idx)
+            # -----------------------------
+            # GEN<->RECO matching
+            # -----------------------------
+            gen2reco_evt = {}
 
-            # GEN<->RECO matching + fill gen2reco_evt
             for (inp, aname), (rpt, reta, rphi) in reco_by_key.items():
                 matched, un_g, un_r = match_gen_to_reco(
                     gen_pt, gen_eta, gen_phi,
@@ -480,14 +260,14 @@ def run(cfg, cfg_tag: str):
                     for m in matched
                 }
 
-                unmatched_counts[(inp, aname)]["event"].append(ievt)
+                unmatched_counts[(inp, aname)]["event"].append(event_id)
                 unmatched_counts[(inp, aname)]["dz_cat"].append(int(dz_cat_evt))
                 unmatched_counts[(inp, aname)]["nunmatched_gen"].append(int(len(un_g)))
                 unmatched_counts[(inp, aname)]["nunmatched_reco"].append(int(len(un_r)))
 
                 for m in matched:
                     match_records[(inp, aname)].append({
-                        "event": ievt,
+                        "event": event_id,
                         "gen_idx": int(m["gen_idx"]),
                         "reco_idx": int(m["reco_idx"]),
                         "gen_pt": float(m["gen_pt"]),
@@ -502,7 +282,6 @@ def run(cfg, cfg_tag: str):
                         "dz_cat": int(dz_cat_evt),
                     })
 
-                # reco→gen matching
                 m_r2g, _, _ = match_reco_to_gen(
                     rpt, reta, rphi,
                     gen_pt, gen_eta, gen_phi,
@@ -529,7 +308,7 @@ def run(cfg, cfg_tag: str):
                         dr_m = -1.0
 
                     reco_match_records[(inp, aname)].append({
-                        "event": ievt,
+                        "event": event_id,
                         "reco_idx": ir,
                         "reco_pt": float(rpt[ir]),
                         "reco_eta": float(reta[ir]),
@@ -543,24 +322,21 @@ def run(cfg, cfg_tag: str):
                     })
 
             # -----------------------------
-            # AK-compatibility block
+            # AK-compatibility
             # -----------------------------
             if do_akcompat:
-                for inp in enabled_inputs:
+                for inp in inputs:
                     ref_key = (inp, ak_ref_algo)
                     if ref_key not in reco_by_key:
                         continue
 
                     ref_pt, ref_eta, ref_phi = reco_by_key[ref_key]
                     ref_assign = assign_by_key[ref_key]
-
-                    # which REF reco jets are GEN-matched, using gen2reco_evt
                     ref_genmatched = set(gen2reco_evt.get(ref_key, {}).values())
 
-                    # Candidate pT for overlap metrics (PF/PUPPI array)
-                    cand_pt_evt = ak.to_numpy(cand_arrays[inp]["pt"][ievt])
+                    cand_pt_evt = cand_arrays[inp]["pt"]
 
-                    for aname, _ in enabled_algos:
+                    for aname, _ in algos:
                         if aname == ak_ref_algo:
                             continue
 
@@ -568,18 +344,12 @@ def run(cfg, cfg_tag: str):
                         if alt_key not in reco_by_key:
                             continue
 
-                        # -------------------------
-                        # DEFINE alt_* EARLY
-                        # -------------------------
                         alt_pt, alt_eta, alt_phi = reco_by_key[alt_key]
                         alt_assign = assign_by_key[alt_key]
-                        # -------------------------
 
-                        # ============================================================
-                        # (A) GEN-driven comparison: match AK and ALT to SAME gen jet
-                        # ============================================================
-                        ref_map = gen2reco_evt.get(ref_key, {})   # gen_idx -> ref_reco_idx
-                        alt_map = gen2reco_evt.get(alt_key, {})   # gen_idx -> alt_reco_idx
+                        # ---- GEN-driven: both matched to same gen jet
+                        ref_map = gen2reco_evt.get(ref_key, {})
+                        alt_map = gen2reco_evt.get(alt_key, {})
 
                         if ref_map and alt_map:
                             common_gen = sorted(set(ref_map.keys()) & set(alt_map.keys()))
@@ -587,54 +357,38 @@ def run(cfg, cfg_tag: str):
                                 ir = int(ref_map[ig])
                                 ia = int(alt_map[ig])
 
-                                # IoU (pT-weighted)
                                 f_ref_w, f_alt_w, iou_w = pt_weighted_constituent_overlap(
-                                    cand_pt_evt,
-                                    ref_assign, ir,
-                                    alt_assign, ia,
+                                    cand_pt_evt, ref_assign, ir, alt_assign, ia
                                 )
-
-                                # IoU (unweighted)
                                 f_ref_u, f_alt_u, iou_u = unweighted_constituent_overlap(
-                                    ref_assign, ir,
-                                    alt_assign, ia,
+                                    ref_assign, ir, alt_assign, ia
                                 )
 
-                                # ratios: Nconst(AK)/Nconst(Alt) and SumPt(AK)/SumPt(Alt)
                                 n_ref = jet_constituent_count(ref_assign, ir)
                                 n_alt = jet_constituent_count(alt_assign, ia)
                                 sumpt_ref = jet_constituent_sumpt(cand_pt_evt, ref_assign, ir)
                                 sumpt_alt = jet_constituent_sumpt(cand_pt_evt, alt_assign, ia)
 
                                 akcompat_gen_records[(inp, aname)].append({
-                                    "event": ievt,
+                                    "event": event_id,
                                     "dz_cat": int(dz_cat_evt),
-
                                     "gen_idx": int(ig),
                                     "gen_pt": float(gen_pt[ig]),
                                     "gen_eta": float(gen_eta[ig]),
                                     "gen_phi": float(gen_phi[ig]),
-
                                     "ref_pt": float(ref_pt[ir]) if ir < len(ref_pt) else -1.0,
                                     "alt_pt": float(alt_pt[ia]) if ia < len(alt_pt) else -1.0,
-
-                                    # IoU + fractions
                                     "iou": float(iou_w),
                                     "f_ref": float(f_ref_w),
                                     "f_alt": float(f_alt_w),
-
                                     "iou_unw": float(iou_u),
                                     "f_ref_unw": float(f_ref_u),
                                     "f_alt_unw": float(f_alt_u),
-
-                                    # ratios
                                     "ratio_n": float(safe_ratio(n_ref, n_alt, default=np.nan)),
                                     "ratio_pt": float(safe_ratio(sumpt_ref, sumpt_alt, default=np.nan)),
                                 })
 
-                        # ============================================================
-                        # (B) RECO<->RECO matching: REF-driven greedy 1-1
-                        # ============================================================
+                        # ---- RECO<->RECO matching, ref-driven
                         matches, un_ref, un_alt = match_reco_to_reco(
                             ref_pt, ref_eta, ref_phi,
                             alt_pt, alt_eta, alt_phi,
@@ -646,12 +400,11 @@ def run(cfg, cfg_tag: str):
                         matched_ref_set = {int(m["ref_idx"]) for m in matches}
                         matched_alt_set = {int(m["alt_idx"]) for m in matches}
 
-                        # Store AK->ALT matching efficiency inputs (per REF jet)
                         for ir in range(len(ref_pt)):
                             if float(ref_pt[ir]) < float(cfg.MATCHING["pt_reco_min"]):
                                 continue
                             akmatch_ref_records[(inp, aname)].append({
-                                "event": ievt,
+                                "event": event_id,
                                 "dz_cat": int(dz_cat_evt),
                                 "ref_idx": int(ir),
                                 "ref_pt": float(ref_pt[ir]),
@@ -659,12 +412,11 @@ def run(cfg, cfg_tag: str):
                                 "is_matched": int(ir in matched_ref_set),
                             })
 
-                        # Store ALT fake-rate inputs (per ALT jet)
                         for ia in range(len(alt_pt)):
                             if float(alt_pt[ia]) < float(cfg.MATCHING["pt_reco_min"]):
                                 continue
                             akmatch_alt_records[(inp, aname)].append({
-                                "event": ievt,
+                                "event": event_id,
                                 "dz_cat": int(dz_cat_evt),
                                 "alt_idx": int(ia),
                                 "alt_pt": float(alt_pt[ia]),
@@ -672,45 +424,37 @@ def run(cfg, cfg_tag: str):
                                 "is_fake": int(ia not in matched_alt_set),
                             })
 
-                        # Constituent overlap metrics for matched jet pairs only
                         for m in matches:
                             ir = int(m["ref_idx"])
                             ia = int(m["alt_idx"])
 
                             f_ref_w, f_alt_w, iou_w = pt_weighted_constituent_overlap(
-                                cand_pt_evt,
-                                ref_assign, ir,
-                                alt_assign, ia,
+                                cand_pt_evt, ref_assign, ir, alt_assign, ia
                             )
-
                             f_ref_u, f_alt_u, iou_u = unweighted_constituent_overlap(
-                                ref_assign, ir,
-                                alt_assign, ia,
+                                ref_assign, ir, alt_assign, ia
                             )
 
                             akcompat_records[(inp, aname)].append({
-                                "event": ievt,
+                                "event": event_id,
                                 "dz_cat": int(dz_cat_evt),
-
                                 "ref_pt": float(m["ref_pt"]),
                                 "ref_eta": float(m["ref_eta"]),
                                 "ref_genmatched": int(ir in ref_genmatched),
                                 "dr_ref_alt": float(m["dr"]),
-
                                 "iou": float(iou_w),
                                 "f_ref": float(f_ref_w),
                                 "f_alt": float(f_alt_w),
-
                                 "iou_unw": float(iou_u),
                                 "f_ref_unw": float(f_ref_u),
                                 "f_alt_unw": float(f_alt_u),
                             })
 
-                            
+        # -----------------------------
+        # Write caches
+        # -----------------------------
+        print("Writing study caches...")
 
-        # -----------------------------
-        # Write caches 
-        # -----------------------------
         denom_gen_pt = np.concatenate(denom_gen_pt) if denom_gen_pt else np.array([], dtype=np.float32)
         denom_gen_eta = np.concatenate(denom_gen_eta) if denom_gen_eta else np.array([], dtype=np.float32)
         denom_dz_cat = np.concatenate(denom_dz_cat) if denom_dz_cat else np.array([], dtype=np.int32)
@@ -721,8 +465,6 @@ def run(cfg, cfg_tag: str):
             gen_eta=denom_gen_eta,
             dz_cat=denom_dz_cat,
         )
-
-        print("Writing cache files...")
 
         for (inp, aname), recs in match_records.items():
             out = os.path.join(out_cache, f"matches__{sanitize(inp)}__{sanitize(aname)}.npz")
@@ -744,10 +486,24 @@ def run(cfg, cfg_tag: str):
 
         for (inp, aname), recs in reco_match_records.items():
             out = os.path.join(out_cache, f"recomatch__{sanitize(inp)}__{sanitize(aname)}.npz")
-            cols = {k: [] for k in recs[0].keys()} if recs else {}
+
+            cols = {
+                "event": [],
+                "reco_idx": [],
+                "reco_pt": [],
+                "reco_eta": [],
+                "reco_phi": [],
+                "is_matched": [],
+                "gen_pt": [],
+                "gen_eta": [],
+                "gen_phi": [],
+                "dr": [],
+                "dz_cat": [],
+            }
             for r in recs:
                 for k in cols:
                     cols[k].append(r[k])
+
             save_columnar_npz(
                 out, cols,
                 dtypes={
@@ -780,13 +536,22 @@ def run(cfg, cfg_tag: str):
         for (inp, aname), em in evt_metrics.items():
             out = os.path.join(out_cache, f"event_metrics__{sanitize(inp)}__{sanitize(aname)}.npz")
 
-            cols = {"event": em["event"], "dz_cat": em["dz_cat"], "nseeds": em["nseeds"]}
-            dtypes = {"event": np.int32, "dz_cat": np.int32, "nseeds": np.int32}
+            cols = {
+                "event": em["event"],
+                "dz_cat": em["dz_cat"],
+                "nseeds": em["nseeds"],
+            }
+            dtypes = {
+                "event": np.int32,
+                "dz_cat": np.int32,
+                "nseeds": np.int32,
+            }
 
             for T, arr in em["njet_ge_T"].items():
                 k = f"njet_ge_{int(T)}"
                 cols[k] = arr
                 dtypes[k] = np.int32
+
             for T, arr in em["ht_ge_T"].items():
                 k = f"ht_ge_{int(T)}"
                 cols[k] = arr
@@ -794,16 +559,7 @@ def run(cfg, cfg_tag: str):
 
             save_columnar_npz(out, cols, dtypes)
 
-        if do_agree:
-            for (inp, aname), fracs in agreement.items():
-                out = os.path.join(out_cache, f"agreement__{sanitize(inp)}__{sanitize(aname)}.npz")
-                np.savez_compressed(out, fractions=np.asarray(fracs, dtype=np.float32))
-
-        # -----------------------------
-        # Write AK-compat caches
-        # -----------------------------
         if do_akcompat:
-            # (A) RECO<->RECO matched-pair overlap metrics (IoU etc.)
             for (inp, aname), recs in akcompat_records.items():
                 if not recs:
                     continue
@@ -818,23 +574,19 @@ def run(cfg, cfg_tag: str):
                     dtypes={
                         "event": np.int32,
                         "dz_cat": np.int32,
-
                         "ref_pt": np.float32,
                         "ref_eta": np.float32,
                         "ref_genmatched": np.int32,
                         "dr_ref_alt": np.float32,
-
                         "iou": np.float32,
                         "f_ref": np.float32,
                         "f_alt": np.float32,
-
                         "iou_unw": np.float32,
                         "f_ref_unw": np.float32,
                         "f_alt_unw": np.float32,
                     }
                 )
 
-            # (B) GEN-common: AK and ALT matched to the SAME gen jet
             for (inp, aname), recs in akcompat_gen_records.items():
                 if not recs:
                     continue
@@ -849,29 +601,23 @@ def run(cfg, cfg_tag: str):
                     dtypes={
                         "event": np.int32,
                         "dz_cat": np.int32,
-
                         "gen_idx": np.int32,
                         "gen_pt": np.float32,
                         "gen_eta": np.float32,
                         "gen_phi": np.float32,
-
                         "ref_pt": np.float32,
                         "alt_pt": np.float32,
-
                         "iou": np.float32,
                         "f_ref": np.float32,
                         "f_alt": np.float32,
-
                         "iou_unw": np.float32,
                         "f_ref_unw": np.float32,
                         "f_alt_unw": np.float32,
-
                         "ratio_n": np.float32,
                         "ratio_pt": np.float32,
                     }
                 )
 
-            # (C) Ref-side AK->ALT matching efficiency inputs
             for (inp, aname), recs in akmatch_ref_records.items():
                 if not recs:
                     continue
@@ -893,7 +639,6 @@ def run(cfg, cfg_tag: str):
                     }
                 )
 
-            # (D) Alt-side ALT fake-rate inputs
             for (inp, aname), recs in akmatch_alt_records.items():
                 if not recs:
                     continue
@@ -915,14 +660,16 @@ def run(cfg, cfg_tag: str):
                     }
                 )
 
-        print(f"Done processing {proc}. Cache in: {out_cache}")
+        print(f"Done studies for {proc}. Cache in: {out_cache}")
 
-    print("\nAll processing done.")
-
+    print("\nAll studies done.")
 
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg = load_cfg_from_path(args.config)
-    tag = config_tag_from_path(args.config)
+
+    cfg_path = resolve_config_path(args.config)
+    cfg = load_cfg_from_path(cfg_path)
+    tag = config_tag_from_path(cfg_path)
+
     run(cfg, tag)
