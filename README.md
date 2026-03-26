@@ -168,12 +168,6 @@ plots/      → figures
 
 ---
 
-## License
-
-Apache License 2.0
-
----
-
 ## Citation
 
 If you use this framework in a study or publication, please cite the repository and reference the corresponding analysis or thesis where applicable.
